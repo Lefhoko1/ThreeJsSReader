@@ -7,6 +7,7 @@ import { MarketAnalysisIndicators, MarketSelectionResult } from './services/Mark
 import { StrategyCore, BetCalculationResult } from './stratergycore';
 import { UptrendPatterns, DowntrendPatterns, CandlePattern } from './strategyCombinations';
 import { Session } from './models/Session';
+import { EmailService } from './services/EmailService';
 
 interface TradingBotState {
   isInitialized: boolean;
@@ -44,6 +45,7 @@ export class StarBotTradingLogic {
   private derivTradingService: DerivTradingService;
   private marketAnalysis: MarketAnalysisIndicators;
   private strategyCore: StrategyCore;
+  private emailService: EmailService;
   private sequelize: Sequelize;
 
   private botState: TradingBotState = {
@@ -70,6 +72,7 @@ export class StarBotTradingLogic {
     this.derivTradingService = new DerivTradingService(derivConfig);
     this.marketAnalysis = new MarketAnalysisIndicators(sequelize);
     this.strategyCore = new StrategyCore();
+    this.emailService = new EmailService();
   }
 
   /**
@@ -92,8 +95,12 @@ export class StarBotTradingLogic {
       this.botState.isWaitingForSignal = true;
 
       console.log('✅ StarBot initialized successfully, waiting for signals...');
+
+      // Send bot start email
+      await this.emailService.sendBotStartEmail();
     } catch (error) {
       console.error('❌ StarBot initialization failed:', error);
+      await this.emailService.sendErrorEmail(error as Error, 'Bot initialization');
       throw error;
     }
   }
@@ -117,6 +124,7 @@ export class StarBotTradingLogic {
       }
     } catch (error) {
       console.error('❌ Error in trading cycle:', error);
+      await this.emailService.sendErrorEmail(error as Error, 'Trading cycle');
       throw error;
     }
   }
@@ -146,6 +154,7 @@ export class StarBotTradingLogic {
       await this.createAndSeedSession(marketSelection);
     } catch (error) {
       console.error('❌ Error checking signals:', error);
+      await this.emailService.sendErrorEmail(error as Error, 'Signal checking');
       throw error;
     }
   }
@@ -187,8 +196,12 @@ export class StarBotTradingLogic {
 
       // Execute first bet
       await this.executeBet(sessionId, trend, 1);
+
+      // Send session start email
+      await this.emailService.sendSessionStartEmail(sessionId, marketSelection.symbol, trend);
     } catch (error) {
       console.error('❌ Error creating session:', error);
+      await this.emailService.sendErrorEmail(error as Error, 'Session creation');
       throw error;
     }
   }
@@ -291,6 +304,7 @@ export class StarBotTradingLogic {
       await this.executeBet(this.botState.activeSessionId!, this.sessionTrend!, nextBetLevel);
     } catch (error) {
       console.error('❌ Error handling active session:', error);
+      await this.emailService.sendErrorEmail(error as Error, 'Active session handling');
       throw error;
     }
   }
@@ -365,8 +379,12 @@ export class StarBotTradingLogic {
           console.log(`✅ Bet ${betLevel} placed for pattern ${tableInfo.pattern}: ${JSON.stringify(tradeResult)}`);
         }
       }
+
+      // Send trade placed email
+      await this.emailService.sendTradePlacedEmail(sessionId, betLevel, betCalculation.betAmount, betCalculation.direction, this.sessionSymbol!);
     } catch (error) {
       console.error(`❌ Error executing bet ${betLevel}:`, error);
+      await this.emailService.sendErrorEmail(error as Error, `Bet ${betLevel} execution`);
       throw error;
     }
   }
@@ -443,10 +461,14 @@ export class StarBotTradingLogic {
           );
 
           console.log(`✅ Updated pattern ${pattern} bet ${betLevel}: ${result.result}`);
+
+          // Send bet result email for this pattern
+          await this.emailService.sendBetResultEmail(this.botState.activeSessionId!, betLevel, result.result, this.sessionSymbol!);
         }
       }
     } catch (error) {
       console.error(`❌ Error updating bet results:`, error);
+      await this.emailService.sendErrorEmail(error as Error, `Bet ${betLevel} results update`);
       throw error;
     }
   }
@@ -570,8 +592,12 @@ export class StarBotTradingLogic {
       // Check for new signals to start next session
       console.log('🔄 Starting new cycle...');
       await this.checkAndGenerateSignals();
+
+      // Send session result email
+      await this.emailService.sendSessionResultEmail(sessionId, sessionResult, this.botState.activeSymbol!);
     } catch (error) {
       console.error('❌ Error evaluating session completion:', error);
+      await this.emailService.sendErrorEmail(error as Error, 'Session completion evaluation');
       throw error;
     }
   }
