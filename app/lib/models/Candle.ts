@@ -1,47 +1,76 @@
-import { Sequelize, DataTypes } from 'sequelize';
+import { Sequelize, DataTypes, Model } from 'sequelize';
 
 export interface CandleAttributes {
-  id: number;
+  id?: number;
   timestamp: Date;
   open: number;
   high: number;
   low: number;
   close: number;
-  volume?: number;
+  volume: number;
+  created_at?: Date;
+}
+
+export class Candle extends Model<CandleAttributes> implements CandleAttributes {
+  declare id: number;
+  declare timestamp: Date;
+  declare open: number;
+  declare high: number;
+  declare low: number;
+  declare close: number;
+  declare volume: number;
+  declare created_at: Date;
 }
 
 export function createCandleModel(sequelize: Sequelize, tableName: string) {
-  return sequelize.define(tableName, {
-    id: {
-      type: DataTypes.INTEGER,
-      primaryKey: true,
-      autoIncrement: true,
+  Candle.init(
+    {
+      id: {
+        type: DataTypes.INTEGER,
+        autoIncrement: true,
+        primaryKey: true,
+      },
+      timestamp: {
+        type: DataTypes.DATE,
+        allowNull: false,
+      },
+      open: {
+        type: DataTypes.DECIMAL(20, 8),
+        allowNull: false,
+      },
+      high: {
+        type: DataTypes.DECIMAL(20, 8),
+        allowNull: false,
+      },
+      low: {
+        type: DataTypes.DECIMAL(20, 8),
+        allowNull: false,
+      },
+      close: {
+        type: DataTypes.DECIMAL(20, 8),
+        allowNull: false,
+      },
+      volume: {
+        type: DataTypes.DECIMAL(20, 8),
+        allowNull: false,
+        defaultValue: 0,
+      },
+      created_at: {
+        type: DataTypes.DATE,
+        defaultValue: DataTypes.NOW,
+      },
     },
-    timestamp: {
-      type: DataTypes.DATE,
-      allowNull: false,
-    },
-    open: {
-      type: DataTypes.FLOAT,
-      allowNull: false,
-    },
-    high: {
-      type: DataTypes.FLOAT,
-      allowNull: false,
-    },
-    low: {
-      type: DataTypes.FLOAT,
-      allowNull: false,
-    },
-    close: {
-      type: DataTypes.FLOAT,
-      allowNull: false,
-    },
-    volume: {
-      type: DataTypes.INTEGER,
-      allowNull: true,
-    },
-  }, {
-    timestamps: false, // Disable automatic timestamps since we have custom timestamp
-  });
+    {
+      sequelize,
+      tableName: tableName, // Use exact table name provided
+      timestamps: false,
+      indexes: [
+        {
+          fields: ['timestamp'],
+        },
+      ],
+    }
+  );
+  
+  return Candle;
 }

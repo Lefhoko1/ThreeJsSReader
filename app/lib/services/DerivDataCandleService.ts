@@ -7,51 +7,54 @@ export class DerivDataCandleService {
   private symbols = [...ALL_VOLATILITY_SYMBOLS];
   private ws: WebSocket | null = null;
   private sequelize: Sequelize;
-  private appId: string = 'YOUR_APP_ID'; // Replace with actual app ID
+  private appId: string;
 
   constructor(sequelize: Sequelize) {
     this.sequelize = sequelize;
+    this.appId = process.env.DERIV_APP_ID || '1089';
   }
 
-  // Create tables for each symbol if they don't exist
+  // Create tables for each symbol using the symbol name as table name
   async createTables(): Promise<void> {
+    console.log('📊 Creating tables for symbols:', this.symbols);
     for (const symbol of this.symbols) {
-      const tableName = `${symbol.toLowerCase().replace('_', '')}_candles`;
+      // Use symbol directly as table name (e.g., "R_10", "R_25", "BOOM1000")
+      const tableName = symbol;
       const model = createCandleModel(this.sequelize, tableName);
       await model.sync();
+      console.log(`✅ Table ${tableName} created/verified`);
     }
   }
 
-  // Fetch initial 1000 candles for a symbol by subscribing with count
-  async fetchInitialCandles(symbol: string): Promise<void> {
-    // Since subscription with count gives historical, we'll handle in connectAndSubscribe
-    // This method can be used to ensure data is fetched
-  }
-
-  // Connect to Deriv WebSocket and subscribe to candles for all symbols with historical count
+  // Connect to Deriv WebSocket and subscribe to candles for all symbols
   async connectAndSubscribe(): Promise<void> {
+    console.log(`🔌 Connecting to Deriv WebSocket with appId: ${this.appId}`);
     this.ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${this.appId}`);
 
     this.ws.on('open', () => {
-      console.log('Connected to Deriv WebSocket for candle data');
+      console.log('✅ Connected to Deriv WebSocket for candle data');
       for (const symbol of this.symbols) {
-        this.ws!.send(JSON.stringify({
+        const request = {
           candles: symbol,
           subscribe: 1,
           granularity: 1800, // 30 minutes in seconds
-          count: 1000, // Get last 1000 candles
-        }));
+          count: 1000,
+        };
+        this.ws!.send(JSON.stringify(request));
+        console.log(`📡 Subscribed to ${symbol} candles`);
       }
     });
 
-    this.ws.on('message', (data: Buffer) => {
+    this.ws.on('message', async (data: Buffer) => {
       const message = JSON.parse(data.toString());
       if (message.msg_type === 'candles') {
         const candleData = message.candles;
         if (candleData && candleData.length > 0) {
+          const symbol = message.echo_req.candles;
+          console.log(`📊 Received ${candleData.length} candles for ${symbol}`);
           for (const candle of candleData) {
-            if (candle.is_closed) { // Store only completed candles
-              this.storeCandle(message.echo_req.candles, candle);
+            if (candle.is_closed) {
+              await this.storeCandle(symbol, candle);
             }
           }
         }
@@ -59,30 +62,35 @@ export class DerivDataCandleService {
     });
 
     this.ws.on('error', (error) => {
-      console.error('WebSocket error:', error);
+      console.error('❌ WebSocket error:', error);
     });
 
     this.ws.on('close', () => {
-      console.log('WebSocket connection closed');
+      console.log('🔌 WebSocket connection closed');
     });
   }
 
-  // Store a completed candle in the database
+  // Store a completed candle in the database using symbol as table name
   private async storeCandle(symbol: string, candle: any): Promise<void> {
-    const tableName = `${symbol.toLowerCase().replace('_', '')}_candles`;
-    const model = createCandleModel(this.sequelize, tableName);
-    await model.create({
-      timestamp: new Date(candle.epoch * 1000),
-      open: candle.open,
-      high: candle.high,
-      low: candle.low,
-      close: candle.close,
-      volume: candle.volume || 0,
-    });
-    console.log(`Stored candle for ${symbol} at ${new Date(candle.epoch * 1000)}`);
+    try {
+      // Use symbol directly as table name
+      const tableName = symbol;
+      const model = createCandleModel(this.sequelize, tableName);
+      await model.create({
+        timestamp: new Date(candle.epoch * 1000),
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: candle.volume || 0,
+      });
+      console.log(`💾 Stored candle for ${symbol} at ${new Date(candle.epoch * 1000)}`);
+    } catch (error) {
+      console.error(`❌ Error storing candle for ${symbol}:`, error);
+    }
   }
 
-  // Fetch the most recently completed candle for a symbol from the database
+  // Fetch the most recently completed candle for a symbol
   async fetchPreviousCompletedCandle(symbol: string): Promise<any | null> {
     const normalizedIncomingSymbol = symbol.toUpperCase();
     const supportedSymbol = this.symbols.find((s) => s.toUpperCase() === normalizedIncomingSymbol);
@@ -91,7 +99,8 @@ export class DerivDataCandleService {
       throw new Error(`Symbol ${symbol} is not supported by DerivDataCandleService`);
     }
 
-    const tableName = `${supportedSymbol.toLowerCase().replace(/_/g, '')}_candles`;
+    // Use symbol directly as table name
+    const tableName = supportedSymbol;
     const model = createCandleModel(this.sequelize, tableName);
 
     const candle = await model.findOne({
@@ -101,22 +110,17 @@ export class DerivDataCandleService {
     return candle ? candle.get({ plain: true }) : null;
   }
 
-  // Method to update latest candles - can be called by API endpoint every 30 minutes
+  // Method to update latest candles
   async updateLatestCandles(): Promise<void> {
-    // Since we're subscribing in real-time, this method can be used to ensure connection or fetch missed data
-    // For now, it can trigger a reconnection or check for latest data
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       await this.connectAndSubscribe();
     }
-    // Optionally, fetch latest candle manually if needed
   }
 
-  // Initialize the service: create tables and fetch initial data
+  // Initialize the service: create tables and connect
   async initialize(): Promise<void> {
+    console.log('🚀 Initializing DerivDataCandleService...');
     await this.createTables();
-    for (const symbol of this.symbols) {
-      await this.fetchInitialCandles(symbol);
-    }
     await this.connectAndSubscribe();
   }
 
