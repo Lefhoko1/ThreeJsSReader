@@ -1,19 +1,11 @@
 import { Sequelize } from 'sequelize';
+import pg from 'pg';
 
-// Use the non-pooling URL from Vercel Supabase integration
-const databaseUrl = process.env.POSTGRES_URL_NON_POOLING;
+const databaseUrl = process.env.POSTGRES_URL_NON_POOLING || 'postgres://postgres.wbszfoogorgnaxdvezti:4AqL0waGDMydt6lm@aws-1-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require';
 
-if (!databaseUrl) {
-  throw new Error('POSTGRES_URL_NON_POOLING environment variable is missing.');
-}
-
-// Append sslmode=verify-full to enforce proper SSL validation
-const finalUrl = databaseUrl.includes('sslmode=')
-  ? databaseUrl.replace(/sslmode=\w+/, 'sslmode=verify-full')
-  : `${databaseUrl}&sslmode=verify-full`;
-
-const sequelize = new Sequelize(finalUrl, {
+const sequelize = new Sequelize(databaseUrl, {
   dialect: 'postgres',
+  dialectModule: pg,
   logging: false,
   dialectOptions: {
     ssl: {
