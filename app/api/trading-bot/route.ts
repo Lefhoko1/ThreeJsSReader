@@ -153,7 +153,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 export async function DELETE(): Promise<NextResponse> {
     try {
         if (candleService) {
-            candleService.closeConnection();
+            //candleService.closeConnection();
             candleService = null;
             isCandleServiceInitialized = false;
         }
