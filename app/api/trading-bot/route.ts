@@ -115,6 +115,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                 isInitialized: botState.isInitialized,
                 isWaitingForSignal: botState.isWaitingForSignal,
                 activeSessionId: botState.activeSessionId,
+                activeSymbol: botState.activeSymbol,
                 lastProcessedCandle: botState.lastProcessedCandle
             },
             duration_ms: duration_ms,
@@ -157,6 +158,7 @@ export async function GET(): Promise<NextResponse> {
                 isInitialized: botState.isInitialized,
                 isWaitingForSignal: botState.isWaitingForSignal,
                 activeSessionId: botState.activeSessionId,
+                activeSymbol: botState.activeSymbol,
                 sessionStartTime: botState.sessionStartTime,
                 lastProcessedCandle: botState.lastProcessedCandle
             },

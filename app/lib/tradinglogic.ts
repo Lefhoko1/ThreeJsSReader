@@ -12,6 +12,7 @@ interface TradingBotState {
   isInitialized: boolean;
   isWaitingForSignal: boolean;
   activeSessionId: string | null;
+  activeSymbol: string | null;
   sessionStartTime: Date | null;
   lastProcessedCandle: Date | null;
 }
@@ -49,6 +50,7 @@ export class StarBotTradingLogic {
     isInitialized: false,
     isWaitingForSignal: true,
     activeSessionId: null,
+    activeSymbol: null,
     sessionStartTime: null,
     lastProcessedCandle: null,
   };
@@ -172,11 +174,13 @@ export class StarBotTradingLogic {
       });
 
       this.botState.activeSessionId = sessionId;
+      this.botState.activeSymbol = marketSelection.symbol;
       this.botState.sessionStartTime = sessionCreatedAt;
       this.sessionSymbol = marketSelection.symbol;
       this.sessionTrend = trend;
 
       console.log(`✅ Session created: ${sessionId}, Duration: 150 minutes`);
+      console.log(`🔎 Trading symbol selected from market analysis: ${this.sessionSymbol}`);
 
       // Seed database with pattern tables based on trend
       await this.seedSessionData(sessionId, trend);
@@ -347,6 +351,7 @@ export class StarBotTradingLogic {
       for (const tableInfo of tradableTables) {
         // Only place trade if this table hasn't been traded at this level yet
         if (tableInfo.betLevel < betLevel) {
+          console.log(`🚀 Placing trade using selected symbol: ${this.sessionSymbol}`);
           const tradeResult = await this.derivTradingService.placeTrade({
             amount: betCalculation.betAmount,
             contract_type: betCalculation.direction,
@@ -590,6 +595,7 @@ export class StarBotTradingLogic {
    */
   private resetSession(): void {
     this.botState.activeSessionId = null;
+    this.botState.activeSymbol = null;
     this.botState.sessionStartTime = null;
     this.botState.isWaitingForSignal = true;
     this.seededTables.clear();
