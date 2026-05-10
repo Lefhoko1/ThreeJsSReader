@@ -5,11 +5,7 @@ export class EmailService {
   private recipientEmail: string = 'lefhokobobaathebe1@gmail.com';
 
   constructor() {
-    const apiKey = process.env.RESEND_API_KEY;
-    if (!apiKey) {
-      throw new Error('RESEND_API_KEY environment variable is required');
-    }
-    this.resend = new Resend(apiKey);
+    this.resend = new Resend('re_GTUa564A_8WKfXGEcp4MgVMn331B6qyLD');
   }
 
   async sendBotStartEmail(): Promise<void> {

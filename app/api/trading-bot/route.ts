@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import sequelize from '@/app/lib/database';
 import { StarBotTradingLogic } from '@/app/lib/tradinglogic';
+import { DerivDataCandleService } from '../../lib/services/DerivDataCandleService';
 
 // ============================================
 // TYPES FOR BINARY OPTIONS TRADING
@@ -61,6 +62,8 @@ interface TradeResponse {
 
 // Store trading bot instance
 let tradingBot: StarBotTradingLogic | null = null;
+let candleService: DerivDataCandleService | null = null;
+let isCandleServiceInitialized = false;
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
     const startTime = Date.now();
@@ -87,7 +90,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             throw new Error('Missing Deriv credentials');
         }
 
-        // 4. Initialize StarBot if not exists
+        // 4. Initialize Candle Service if not already initialized
+        if (!candleService) {
+            console.log('🕯️ Initializing DerivDataCandleService...');
+            candleService = new DerivDataCandleService(sequelize);
+            await candleService.initialize();
+            isCandleServiceInitialized = true;
+            console.log('✅ Candle service initialized successfully');
+        }
+
+        // 5. Initialize StarBot if not exists
         if (!tradingBot) {
             tradingBot = new StarBotTradingLogic(sequelize, {
                 appId: appId,
@@ -99,7 +111,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             await tradingBot.initializeBot();
         }
 
-        // 5. Process trading cycle
+        // 6. Process trading cycle
         console.log('🔄 Processing trading cycle...');
         await tradingBot.processTradingCycle();
 
@@ -111,6 +123,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         return NextResponse.json({
             success: true,
             message: 'Trading cycle processed successfully',
+            candleServiceStatus: {
+                isInitialized: isCandleServiceInitialized,
+                symbolsTracked: candleService ? 'active' : 'inactive'
+            },
             botState: {
                 isInitialized: botState.isInitialized,
                 isWaitingForSignal: botState.isWaitingForSignal,
@@ -133,12 +149,53 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 }
 
+// Optional: Add a cleanup endpoint for graceful shutdown
+export async function DELETE(): Promise<NextResponse> {
+    try {
+        if (candleService) {
+            candleService.closeConnection();
+            candleService = null;
+            isCandleServiceInitialized = false;
+        }
+        
+        if (tradingBot) {
+            // Add a close/cleanup method to your trading bot if needed
+            tradingBot = null;
+        }
+        
+        return NextResponse.json({
+            success: true,
+            message: 'Services cleaned up successfully',
+            timestamp: new Date().toISOString()
+        });
+    } catch (error: any) {
+        return NextResponse.json({
+            success: false,
+            error: error.message,
+            timestamp: new Date().toISOString()
+        }, { status: 500 });
+    }
+}
+
 export async function GET(): Promise<NextResponse> {
     try {
+        const status = {
+            candleService: {
+                isInitialized: isCandleServiceInitialized,
+                isActive: candleService !== null
+            },
+            tradingBot: tradingBot ? {
+                isInitialized: tradingBot.getBotState().isInitialized,
+                isWaitingForSignal: tradingBot.getBotState().isWaitingForSignal,
+                activeSessionId: tradingBot.getBotState().activeSessionId
+            } : null
+        };
+        
         if (!tradingBot) {
             return NextResponse.json({
                 status: 'ready',
-                message: 'StarBot trading logic is ready to initialize',
+                message: 'StarBot trading logic and candle service are ready to initialize',
+                ...status,
                 config: {
                     derivAppId: process.env.DERIV_APP_ID || 'not set',
                     derivWsUrl: process.env.DERIV_WS_URL || 'wss://ws.binaryws.com/websockets/v3',
@@ -154,11 +211,11 @@ export async function GET(): Promise<NextResponse> {
         return NextResponse.json({
             status: 'running',
             message: 'StarBot trading logic is active',
+            ...status,
             botState: {
                 isInitialized: botState.isInitialized,
                 isWaitingForSignal: botState.isWaitingForSignal,
                 activeSessionId: botState.activeSessionId,
-                activeSymbol: botState.activeSymbol,
                 sessionStartTime: botState.sessionStartTime,
                 lastProcessedCandle: botState.lastProcessedCandle
             },
@@ -187,7 +244,7 @@ export async function OPTIONS(): Promise<NextResponse> {
         status: 204,
         headers: {
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
             'Access-Control-Allow-Headers': 'Content-Type, x-cron-secret'
         }
     });
