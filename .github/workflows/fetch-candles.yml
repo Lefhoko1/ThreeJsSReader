@@ -2,9 +2,7 @@ name: Fetch Deriv Candles
 
 on:
   schedule:
-    # Run every 30 minutes at minute 0 and 30
     - cron: '0,30 * * * *'
-  # Allow manual trigger from GitHub UI
   workflow_dispatch:
     inputs:
       mode:
@@ -27,7 +25,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'  # Changed from 20 to 22
       
       - name: Install dependencies
         run: |
