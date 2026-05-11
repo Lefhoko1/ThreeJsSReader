@@ -1,20 +1,26 @@
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
-// Initialize Supabase client
+// Initialize Supabase client with custom WebSocket transport
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    realtime: {
+      transport: WebSocket
+    }
+  }
 );
 
 const SYMBOLS = ['R_10', 'R_25', 'R_50', 'R_75', 'R_100', '1HZ10V', '1HZ25V', '1HZ50V', '1HZ75V', '1HZ100V'];
 
 async function fetchCandlesFromDeriv(symbol, count = 1) {
   return new Promise((resolve, reject) => {
+    console.log(`  Connecting to Deriv for ${symbol}...`);
     const ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089');
     
     const timeout = setTimeout(() => {
-      ws.close();
+      ws.terminate();
       reject(new Error(`Timeout fetching ${symbol}`));
     }, 30000);
 
@@ -60,25 +66,25 @@ async function storeCandles(symbol, candles) {
   for (const candle of candles) {
     const timestamp = new Date(candle.epoch * 1000).toISOString();
     
-    const { data: existing } = await supabase
-      .from(symbol)
-      .select('id')
-      .eq('timestamp', timestamp)
-      .single();
-    
-    if (!existing) {
+    try {
+      // Try to insert, ignore duplicate errors
       const { error } = await supabase
         .from(symbol)
-        .insert({
+        .upsert({
           timestamp: timestamp,
           open: candle.open,
           high: candle.high,
           low: candle.low,
           close: candle.close,
           volume: candle.volume || 0
-        });
+        }, { onConflict: 'timestamp' });
       
       if (!error) stored++;
+    } catch (err) {
+      // Ignore duplicate key errors
+      if (!err.message?.includes('duplicate')) {
+        console.error(`    Error storing candle: ${err.message}`);
+      }
     }
   }
   
@@ -89,16 +95,16 @@ async function main() {
   const mode = process.env.MODE || 'update';
   const count = mode === 'initial' ? 1000 : 1;
   
-  console.log(`🚀 Starting: ${mode} mode, ${count} candle(s) per symbol`);
+  console.log(`🚀 Starting: ${mode} mode, ${count} candle(s) per symbol\n`);
   
   for (const symbol of SYMBOLS) {
     try {
       console.log(`📡 Fetching ${count} candle(s) for ${symbol}...`);
       const candles = await fetchCandlesFromDeriv(symbol, count);
       const stored = await storeCandles(symbol, candles);
-      console.log(`✅ ${symbol}: fetched ${candles.length}, stored ${stored} new`);
+      console.log(`✅ ${symbol}: fetched ${candles.length}, stored ${stored} new\n`);
     } catch (error) {
-      console.error(`❌ ${symbol}: ${error.message}`);
+      console.error(`❌ ${symbol}: ${error.message}\n`);
     }
     
     // Small delay to avoid rate limiting
