@@ -43,10 +43,12 @@ export class DerivDataCandleService {
         console.log('✅ Connected to Deriv');
         for (const symbol of this.symbols) {
           const request = {
-            candles: symbol,
-            subscribe: 0,
-            granularity: 1800,
+            ticks_history: symbol,
+            adjust_start_time: 1,
             count: 1000,
+            end: 'latest',
+            granularity: 1800,
+            style: 'candles'
           };
           ws.send(JSON.stringify(request));
           console.log(`📡 Requested 1000 candles for ${symbol}`);
@@ -56,16 +58,14 @@ export class DerivDataCandleService {
       ws.on('message', async (data: Buffer) => {
         const message = JSON.parse(data.toString());
         
-        if (message.msg_type === 'candles') {
-          const symbol = message.echo_req.candles;
+        if (message.msg_type === 'history') {
+          const symbol = message.echo_req.ticks_history;
           const candles = message.candles || [];
           
           console.log(`📊 Received ${candles.length} candles for ${symbol}`);
           
           for (const candle of candles) {
-            if (candle.is_closed) {
-              await this.storeCandle(symbol, candle);
-            }
+            await this.storeCandle(symbol, candle);
           }
           
           symbolsProcessed++;
@@ -101,10 +101,12 @@ export class DerivDataCandleService {
       
       ws.on('open', () => {
         const request = {
-          candles: symbol,
-          subscribe: 0,
-          granularity: 1800,
+          ticks_history: symbol,
+          adjust_start_time: 1,
           count: 1,
+          end: 'latest',
+          granularity: 1800,
+          style: 'candles'
         };
         ws.send(JSON.stringify(request));
         console.log(`📡 Requesting latest candle for ${symbol}`);
@@ -113,16 +115,13 @@ export class DerivDataCandleService {
       ws.on('message', async (data: Buffer) => {
         const message = JSON.parse(data.toString());
         
-        if (message.msg_type === 'candles') {
-          const symbol = message.echo_req.candles;
+        if (message.msg_type === 'history') {
           const candles = message.candles || [];
           
           if (candles.length > 0) {
-            const latestCandle = candles[0];
-            if (latestCandle.is_closed) {
-              await this.storeCandle(symbol, latestCandle);
-              console.log(`✅ Stored latest candle for ${symbol}`);
-            }
+            const latestCandle = candles[candles.length - 1];
+            await this.storeCandle(symbol, latestCandle);
+            console.log(`✅ Stored latest candle for ${symbol}`);
           }
           
           ws.close();
@@ -198,6 +197,8 @@ export class DerivDataCandleService {
           volume: candle.volume || 0,
         });
         console.log(`💾 Stored new candle for ${symbol} at ${new Date(candle.epoch * 1000)}`);
+      } else {
+        console.log(`⚠️ Candle for ${symbol} at ${new Date(candle.epoch * 1000)} already exists, skipping`);
       }
     } catch (error) {
       console.error(`❌ Error storing candle for ${symbol}:`, error);
