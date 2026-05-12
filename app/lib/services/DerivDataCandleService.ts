@@ -45,10 +45,26 @@ export class DerivDataCandleService {
   }
 
   /**
+   * Sanitize symbol name to be a valid PostgreSQL table name
+   * - Prefix with 'candle_' to avoid numeric starting characters
+   * - Convert to lowercase
+   * - Replace any invalid characters with underscores
+   */
+  private sanitizeTableName(symbol: string): string {
+    // Convert to lowercase and prefix with 'candle_' to ensure valid identifier
+    let tableName = `candle_${symbol.toLowerCase()}`;
+    
+    // Replace any characters that are not letters, numbers, or underscores
+    tableName = tableName.replace(/[^a-z0-9_]/g, '_');
+    
+    return tableName;
+  }
+
+  /**
    * Ensure table exists for a symbol (like ensureTable in your candle sync)
    */
   private async ensureTable(symbol: string): Promise<void> {
-    const tableName = symbol.toLowerCase();
+    const tableName = this.sanitizeTableName(symbol);
     
     const { error } = await this.supabase.rpc('execute_sql', {
       sql: `
@@ -67,12 +83,13 @@ export class DerivDataCandleService {
     console.log('📊 Creating tables for symbols:', this.symbols);
     for (const symbol of this.symbols) {
       await this.ensureTable(symbol);
-      console.log(`✅ Table ${symbol} created/verified`);
+      const tableName = this.sanitizeTableName(symbol);
+      console.log(`✅ Table ${tableName} created/verified for symbol ${symbol}`);
     }
   }
 
   async hasData(symbol: string): Promise<boolean> {
-    const tableName = symbol.toLowerCase();
+    const tableName = this.sanitizeTableName(symbol);
     await this.ensureTable(symbol);
     
     const { count, error } = await this.supabase
@@ -149,7 +166,7 @@ export class DerivDataCandleService {
    * Upsert candles to Supabase (like upsertCandles in your first code)
    */
   private async upsertCandles(symbol: string, candles: any[]): Promise<number> {
-    const tableName = symbol.toLowerCase();
+    const tableName = this.sanitizeTableName(symbol);
     await this.ensureTable(symbol);
     
     const rows = candles.map((candle) => ({
@@ -328,7 +345,7 @@ export class DerivDataCandleService {
    */
   async fetchPreviousCompletedCandle(symbol: string): Promise<any | null> {
     try {
-      const tableName = symbol.toLowerCase();
+      const tableName = this.sanitizeTableName(symbol);
       await this.ensureTable(symbol);
       
       const { data: candle, error } = await this.supabase
@@ -360,7 +377,7 @@ export class DerivDataCandleService {
     limit?: number;
     offset?: number;
   }): Promise<any[]> {
-    const tableName = symbol.toLowerCase();
+    const tableName = this.sanitizeTableName(symbol);
     await this.ensureTable(symbol);
     
     let query = this.supabase
@@ -390,7 +407,7 @@ export class DerivDataCandleService {
    * Get the latest candle for a symbol
    */
   async getLatestCandle(symbol: string): Promise<any | null> {
-    const tableName = symbol.toLowerCase();
+    const tableName = this.sanitizeTableName(symbol);
     await this.ensureTable(symbol);
     
     const { data: candle, error } = await this.supabase
@@ -409,18 +426,18 @@ export class DerivDataCandleService {
   /**
    * Delete old candles (cleanup utility)
    */
-async deleteOldCandles(symbol: string, olderThan: Date): Promise<number> {
-  const tableName = symbol.toLowerCase();
-  await this.ensureTable(symbol);
-  
-  const { error, count } = await this.supabase
-    .from(tableName)
-    .delete({ count: 'exact' })
-    .lt('datetime', olderThan.toISOString());
-  
-  if (error) throw new Error(`Failed to delete old candles for "${tableName}": ${error.message}`);
-  return count || 0;
-}
+  async deleteOldCandles(symbol: string, olderThan: Date): Promise<number> {
+    const tableName = this.sanitizeTableName(symbol);
+    await this.ensureTable(symbol);
+    
+    const { error, count } = await this.supabase
+      .from(tableName)
+      .delete({ count: 'exact' })
+      .lt('datetime', olderThan.toISOString());
+    
+    if (error) throw new Error(`Failed to delete old candles for "${tableName}": ${error.message}`);
+    return count || 0;
+  }
 
   /**
    * Initialize service - either fetch all candles or just update latest
@@ -461,7 +478,7 @@ async deleteOldCandles(symbol: string, olderThan: Date): Promise<number> {
     lastCandle: any | null;
     dateRange: { from: Date | null; to: Date | null };
   }> {
-    const tableName = symbol.toLowerCase();
+    const tableName = this.sanitizeTableName(symbol);
     await this.ensureTable(symbol);
     
     // Get count
