@@ -1,24 +1,67 @@
-import { Model, ModelStatic } from 'sequelize';
-import { createBetRecordModel, BetRecordAttributes, BetRecordCreationAttributes } from '../models/BetRecord';
+import { createClient } from "@supabase/supabase-js";
 import { CandlePattern, UptrendPatterns, DowntrendPatterns } from '../strategyCombinations';
-import sequelize from '../database';
+
+// ─── Config ───────────────────────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+// Fixed schema for bet records (same structure as your candle tables)
+const BET_RECORDS_SCHEMA = `
+  id              BIGSERIAL   PRIMARY KEY,
+  sessionid       UUID        NOT NULL,
+  sessionresult   TEXT,
+  firstbetAmount          DECIMAL(10,2),
+  firstbetResult          TEXT,
+  firstbetactual          TEXT,
+  firstbetexpectedcandle  TEXT(1),
+  secondbetAmount         DECIMAL(10,2),
+  secondbetResult         TEXT,
+  secondbetactual         TEXT,
+  secondbetexpectedcandle TEXT(1),
+  thirdbetAmount          DECIMAL(10,2),
+  thirdbetResult          TEXT,
+  thirdbetactual          TEXT,
+  thirdbetexpectedcandle  TEXT(1),
+  fourthbetAmount         DECIMAL(10,2),
+  fourthbetResult         TEXT,
+  fourthbetactual         TEXT,
+  fourthbetexpectedcandle TEXT(1),
+  fifthbetAmount          DECIMAL(10,2),
+  fifthbetResult          TEXT,
+  fifthbetactual          TEXT,
+  fifthbetexpectedcandle  TEXT(1),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+`;
 
 export class BetRecordService {
-  private models: Map<string, ModelStatic<Model<BetRecordAttributes, BetRecordCreationAttributes>>> = new Map();
+  private supabase;
+
+  constructor() {
+    if (!SUPABASE_URL || !SUPABASE_KEY) {
+      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+    }
+    this.supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  }
 
   /**
-   * Get or create the model for a specific pattern table.
+   * Ensure table exists for a specific pattern (like ensureTable in candle sync)
    */
-  private getModelForPattern(pattern: string): ModelStatic<Model<BetRecordAttributes, BetRecordCreationAttributes>> {
-    const tableName = pattern.toLowerCase();
-    const existingModel = this.models.get(tableName);
-    if (existingModel) {
-      return existingModel;
-    }
-
-    const betModel = createBetRecordModel(sequelize, tableName);
-    this.models.set(tableName, betModel);
-    return betModel;
+  private async ensureTable(pattern: string): Promise<void> {
+    const tableName = `bet_records_${pattern.toLowerCase()}`;
+    
+    const { error } = await this.supabase.rpc('execute_sql', {
+      sql: `
+        CREATE TABLE IF NOT EXISTS ${tableName} (
+          ${BET_RECORDS_SCHEMA}
+        );
+        CREATE INDEX IF NOT EXISTS idx_${tableName}_sessionid ON ${tableName} (sessionid);
+        CREATE INDEX IF NOT EXISTS idx_${tableName}_sessionresult ON ${tableName} (sessionresult);
+        CREATE INDEX IF NOT EXISTS idx_${tableName}_created_at ON ${tableName} (created_at DESC);
+      `,
+    });
+    
+    if (error) throw new Error(`Table creation failed for "${tableName}": ${error.message}`);
   }
 
   /**
@@ -27,35 +70,51 @@ export class BetRecordService {
   async createTables(): Promise<void> {
     const patterns = Object.values(CandlePattern);
     for (const pattern of patterns) {
-      this.getModelForPattern(pattern);
+      await this.ensureTable(pattern);
     }
-
-    await sequelize.sync({ alter: true });
     console.log('Bet record tables created or updated.');
   }
 
   // ---------------------------------------------------------
   // CRUD operations
   // ---------------------------------------------------------
+
   /**
    * Create a new bet record in the specified pattern table.
    */
-  async createRecord(pattern: string, data: Record<string, unknown>): Promise<Model> {
-    const model = this.getModelForPattern(pattern);
-    return model.create(data as any);
+  async createRecord(pattern: string, data: Record<string, unknown>): Promise<any> {
+    const tableName = `bet_records_${pattern.toLowerCase()}`;
+    await this.ensureTable(pattern);
+    
+    const { data: record, error } = await this.supabase
+      .from(tableName)
+      .insert({ ...data, created_at: new Date(), updated_at: new Date() })
+      .select()
+      .single();
+    
+    if (error) throw new Error(`Create failed on "${tableName}": ${error.message}`);
+    return record;
   }
 
   /**
-   * Get a single bet record by its primary key from the specified pattern table.
+   * Get a single bet record by its primary key.
    */
-  async getRecordById(pattern: string, id: number): Promise<Model | null> {
-    const model = this.getModelForPattern(pattern);
-    return model.findByPk(id);
+  async getRecordById(pattern: string, id: number): Promise<any | null> {
+    const tableName = `bet_records_${pattern.toLowerCase()}`;
+    await this.ensureTable(pattern);
+    
+    const { data: record, error } = await this.supabase
+      .from(tableName)
+      .select('*')
+      .eq('id', id)
+      .single();
+    
+    if (error && error.code !== 'PGRST116') throw error;
+    return record;
   }
 
   /**
-   * Get multiple bet records from the specified pattern table.
-   * Supports optional filtering by session and basic pagination.
+   * Get multiple bet records with optional filtering.
    */
   async getRecords(
     pattern: string,
@@ -64,161 +123,175 @@ export class BetRecordService {
       sessionresult?: string;
       limit?: number;
       offset?: number;
-      order?: Array<[string, 'ASC' | 'DESC']>;
+      orderBy?: string;
+      orderDirection?: 'asc' | 'desc';
     }
-  ): Promise<Model[]> {
-    const model = this.getModelForPattern(pattern);
-    const where: Record<string, unknown> = {};
-
+  ): Promise<any[]> {
+    const tableName = `bet_records_${pattern.toLowerCase()}`;
+    await this.ensureTable(pattern);
+    
+    let query = this.supabase.from(tableName).select('*');
+    
     if (options?.sessionid) {
-      where.sessionid = options.sessionid;
+      query = query.eq('sessionid', options.sessionid);
     }
     if (options?.sessionresult) {
-      where.sessionresult = options.sessionresult;
+      query = query.eq('sessionresult', options.sessionresult);
     }
-
-    return model.findAll({
-      where,
-      limit: options?.limit,
-      offset: options?.offset,
-      order: options?.order,
-    });
+    if (options?.limit) {
+      query = query.limit(options.limit);
+    }
+    if (options?.offset) {
+      query = query.range(options.offset, options.offset + (options.limit || 10) - 1);
+    }
+    if (options?.orderBy) {
+      query = query.order(options.orderBy, { ascending: options.orderDirection === 'asc' });
+    }
+    
+    const { data: records, error } = await query;
+    if (error) throw new Error(`Query failed on "${tableName}": ${error.message}`);
+    return records || [];
   }
 
   /**
-   * Update any fields on a bet record in the specified pattern table.
+   * Update any fields on a bet record.
    */
-  async updateRecord(pattern: string, id: number, updates: Record<string, unknown>): Promise<Model | null> {
-    const model = this.getModelForPattern(pattern);
-    const record = await model.findByPk(id);
-    if (!record) {
-      return null;
-    }
-
-    await record.update(updates as any);
+  async updateRecord(pattern: string, id: number, updates: Record<string, unknown>): Promise<any | null> {
+    const tableName = `bet_records_${pattern.toLowerCase()}`;
+    await this.ensureTable(pattern);
+    
+    const { data: record, error } = await this.supabase
+      .from(tableName)
+      .update({ ...updates, updated_at: new Date() })
+      .eq('id', id)
+      .select()
+      .single();
+    
+    if (error) throw new Error(`Update failed on "${tableName}": ${error.message}`);
     return record;
   }
 
   // ---------------------------------------------------------
   // Specific bet updates
   // ---------------------------------------------------------
-  /**
-   * Update only the first bet fields for a given record.
-   */
+
   async updateFirstBet(pattern: string, id: number, data: {
     firstbetAmount?: number;
     firstbetResult?: string;
     firstbetactual?: string;
     firstbetexpectedcandle?: string;
-  }): Promise<Model | null> {
+  }): Promise<any | null> {
     return this.updateRecord(pattern, id, data);
   }
 
-  /**
-   * Update only the second bet fields for a given record.
-   */
   async updateSecondBet(pattern: string, id: number, data: {
     secondbetAmount?: number;
     secondbetResult?: string;
     secondbetactual?: string;
     secondbetexpectedcandle?: string;
-  }): Promise<Model | null> {
+  }): Promise<any | null> {
     return this.updateRecord(pattern, id, data);
   }
 
-  /**
-   * Update only the third bet fields for a given record.
-   */
   async updateThirdBet(pattern: string, id: number, data: {
     thirdbetAmount?: number;
     thirdbetResult?: string;
     thirdbetactual?: string;
     thirdbetexpectedcandle?: string;
-  }): Promise<Model | null> {
+  }): Promise<any | null> {
     return this.updateRecord(pattern, id, data);
   }
 
-  /**
-   * Update only the fourth bet fields for a given record.
-   */
   async updateFourthBet(pattern: string, id: number, data: {
     fourthbetAmount?: number;
     fourthbetResult?: string;
     fourthbetactual?: string;
     fourthbetexpectedcandle?: string;
-  }): Promise<Model | null> {
+  }): Promise<any | null> {
     return this.updateRecord(pattern, id, data);
   }
 
-  /**
-   * Update only the fifth bet fields for a given record.
-   */
   async updateFifthBet(pattern: string, id: number, data: {
     fifthbetAmount?: number;
     fifthbetResult?: string;
     fifthbetactual?: string;
     fifthbetexpectedcandle?: string;
-  }): Promise<Model | null> {
+  }): Promise<any | null> {
     return this.updateRecord(pattern, id, data);
   }
 
-  /**
-   * Update the overall session result for a given record.
-   */
-  async updateSessionResult(pattern: string, id: number, sessionresult: string): Promise<Model | null> {
+  async updateSessionResult(pattern: string, id: number, sessionresult: string): Promise<any | null> {
     return this.updateRecord(pattern, id, { sessionresult });
   }
 
   // ---------------------------------------------------------
   // Delete
   // ---------------------------------------------------------
-  /**
-   * Delete a bet record by primary key from the specified pattern table.
-   */
+
   async deleteRecord(pattern: string, id: number): Promise<boolean> {
-    const model = this.getModelForPattern(pattern);
-    const deletedCount = await model.destroy({
-      where: { id },
-    });
-    return deletedCount > 0;
+    const tableName = `bet_records_${pattern.toLowerCase()}`;
+    await this.ensureTable(pattern);
+    
+    const { error } = await this.supabase
+      .from(tableName)
+      .delete()
+      .eq('id', id);
+    
+    if (error) throw new Error(`Delete failed on "${tableName}": ${error.message}`);
+    return true;
+  }
+
+  // ---------------------------------------------------------
+  // Batch operations (like the candle upsert pattern)
+  // ---------------------------------------------------------
+
+  /**
+   * Batch upsert multiple bet records (like upsertCandles in your candle sync)
+   */
+  async upsertRecords(pattern: string, records: Record<string, unknown>[]): Promise<number> {
+    const tableName = `bet_records_${pattern.toLowerCase()}`;
+    await this.ensureTable(pattern);
+    
+    const recordsWithTimestamps = records.map(record => ({
+      ...record,
+      updated_at: new Date(),
+      created_at: record.created_at || new Date(),
+    }));
+    
+    const { error, count } = await this.supabase
+      .from(tableName)
+      .upsert(recordsWithTimestamps, { 
+        onConflict: 'id',
+        ignoreDuplicates: false 
+      });
+    
+    if (error) throw new Error(`Upsert failed on "${tableName}": ${error.message}`);
+    return count || records.length;
   }
 
   // ---------------------------------------------------------
   // Seeding methods
   // ---------------------------------------------------------
-  /**
-   * Seed the database with initial bet records for uptrend or downtrend patterns.
-   * Creates a new session and populates bet records for each pattern in the specified trend.
-   */
+
   async seedTheFirstWay(trend: 'uptrend' | 'downtrend', symbol: string): Promise<string> {
     return this.seedWithStartingAmount(trend, 0.1, symbol);
   }
 
-  /**
-   * Seed the database with bet records starting at 0.2, doubling each time.
-   */
   async seedTheSecondWay(trend: 'uptrend' | 'downtrend', symbol: string): Promise<string> {
     return this.seedWithStartingAmount(trend, 0.2, symbol);
   }
 
-  /**
-   * Seed the database with bet records starting at 0.4, doubling each time.
-   */
   async seedTheThirdWay(trend: 'uptrend' | 'downtrend', symbol: string): Promise<string> {
     return this.seedWithStartingAmount(trend, 0.4, symbol);
   }
 
   private async seedWithStartingAmount(trend: 'uptrend' | 'downtrend', startingAmount: number, symbol: string): Promise<string> {
-    // Generate unique session ID
     const sessionid = crypto.randomUUID();
-
-    // Note: Session creation should be handled by SessionService
-    // Here we just return the sessionid for the caller to create the session
-
-    // Determine which patterns to seed
-    const patterns = trend === 'uptrend' ? Object.values(UptrendPatterns) : Object.values(DowntrendPatterns);
-
-    // Bet amounts: starting amount, then double each time
+    
+    const patterns = trend === 'uptrend' 
+      ? Object.values(UptrendPatterns) 
+      : Object.values(DowntrendPatterns);
+    
     const betAmounts = [
       startingAmount,
       startingAmount * 2,
@@ -226,11 +299,11 @@ export class BetRecordService {
       startingAmount * 8,
       startingAmount * 16,
     ];
-
+    
     // Create bet records for each pattern
     for (const pattern of patterns) {
       const expectedCandles = pattern.split('').map(c => c.toLowerCase());
-
+      
       await this.createRecord(pattern, {
         sessionid,
         sessionresult: null,
@@ -256,7 +329,7 @@ export class BetRecordService {
         fifthbetexpectedcandle: expectedCandles[4],
       });
     }
-
+    
     console.log(`Seeded ${patterns.length} patterns for ${trend} with session ID: ${sessionid} (starting amount: ${startingAmount})`);
     return sessionid;
   }

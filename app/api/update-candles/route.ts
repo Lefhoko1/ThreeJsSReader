@@ -1,7 +1,5 @@
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { DerivDataCandleService } from '../../lib/services/DerivDataCandleService';
-import sequelize from '../../lib/database';
-import {  NextResponse } from 'next/server';
 
 export async function POST(request: NextRequest) {
   try {
@@ -11,7 +9,7 @@ export async function POST(request: NextRequest) {
     }
 
     console.log('🕯️ Updating latest candles...');
-    const service = new DerivDataCandleService(sequelize);
+    const service = new DerivDataCandleService();
     await service.createTables(); // Ensure tables exist
     await service.updateLatestCandles();
     

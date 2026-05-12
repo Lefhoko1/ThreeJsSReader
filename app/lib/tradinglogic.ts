@@ -1,4 +1,3 @@
-import { Sequelize } from 'sequelize';
 import { SessionService } from './services/SessionService';
 import { BetRecordService } from './services/BetRecordService';
 import { DerivDataCandleService } from './services/DerivDataCandleService';
@@ -6,7 +5,6 @@ import { DerivTradingService, DerivConfig, TradeResult } from './services/DerivT
 import { MarketAnalysisIndicators, MarketSelectionResult } from './services/MarketAnalysisIndicators';
 import { StrategyCore, BetCalculationResult } from './stratergycore';
 import { UptrendPatterns, DowntrendPatterns, CandlePattern } from './strategyCombinations';
-import { Session } from './models/Session';
 import { EmailService } from './services/EmailService';
 
 interface TradingBotState {
@@ -46,7 +44,6 @@ export class StarBotTradingLogic {
   private marketAnalysis: MarketAnalysisIndicators;
   private strategyCore: StrategyCore;
   private emailService: EmailService;
-  private sequelize: Sequelize;
 
   private botState: TradingBotState = {
     isInitialized: false,
@@ -61,16 +58,12 @@ export class StarBotTradingLogic {
   private sessionSymbol: string | null = null;
   private sessionTrend: 'uptrend' | 'downtrend' | null = null;
 
-  constructor(
-    sequelize: Sequelize,
-    derivConfig: DerivConfig
-  ) {
-    this.sequelize = sequelize;
+  constructor(derivConfig: DerivConfig) {
     this.sessionService = new SessionService();
     this.betRecordService = new BetRecordService();
-    this.derivCandleService = new DerivDataCandleService(sequelize);
+    this.derivCandleService = new DerivDataCandleService();
     this.derivTradingService = new DerivTradingService(derivConfig);
-    this.marketAnalysis = new MarketAnalysisIndicators(sequelize);
+    this.marketAnalysis = new MarketAnalysisIndicators();
     this.strategyCore = new StrategyCore();
     this.emailService = new EmailService();
   }
@@ -171,7 +164,7 @@ export class StarBotTradingLogic {
     try {
       // Determine trend from signal direction
       const trend = marketSelection.direction === 'up' ? 'uptrend' : 'downtrend';
-      const sessionId = `${marketSelection.symbol}_${Date.now()}`;
+      const sessionId = crypto.randomUUID(); // Use UUID for session ID
       const sessionCreatedAt = new Date();
 
       // Create session record
@@ -224,7 +217,7 @@ export class StarBotTradingLogic {
       // Create initial record for this pattern
       await this.betRecordService.createRecord(pattern, {
         sessionid: sessionId,
-        sessionresult: 'pending',
+        sessionresult: null,
         firstbetAmount: null,
         firstbetResult: null,
         firstbetactual: null,
@@ -344,7 +337,7 @@ export class StarBotTradingLogic {
 
       // Exclude tables that have lost in previous bets before trading
       if (betLevel > 1) {
-        await this.excludeLossingTables(sessionId, betLevel - 1);
+        await this.excludeLosingTables(sessionId, betLevel - 1);
       }
 
       // Only trade on tables that are not excluded
@@ -376,6 +369,10 @@ export class StarBotTradingLogic {
 
           // Record bet in appropriate pattern table
           tableInfo.betLevel = betLevel;
+          
+          // Update the bet record with the placed bet amount
+          await this.updateBetRecordAmount(sessionId, tableInfo.pattern, betLevel, betCalculation.betAmount);
+          
           console.log(`✅ Bet ${betLevel} placed for pattern ${tableInfo.pattern}: ${JSON.stringify(tradeResult)}`);
         }
       }
@@ -390,10 +387,22 @@ export class StarBotTradingLogic {
   }
 
   /**
+   * Update bet record amount in database
+   */
+  private async updateBetRecordAmount(sessionId: string, pattern: CandlePattern, betLevel: number, amount: number): Promise<void> {
+    const records = await this.betRecordService.getRecords(pattern, { sessionid: sessionId });
+    
+    for (const record of records) {
+      const amountField = `${betLevel === 1 ? 'first' : betLevel === 2 ? 'second' : betLevel === 3 ? 'third' : betLevel === 4 ? 'fourth' : 'fifth'}betAmount`;
+      await this.betRecordService.updateRecord(pattern, record.id, { [amountField]: amount });
+    }
+  }
+
+  /**
    * Exclude losing tables from trading
    * Key business rule: if first candle for a table loses → exclude from remainder
    */
-  private async excludeLossingTables(sessionId: string, lastBetLevel: number): Promise<void> {
+  private async excludeLosingTables(sessionId: string, lastBetLevel: number): Promise<void> {
     console.log(`🚫 Checking for losing tables to exclude after bet ${lastBetLevel}...`);
 
     for (const [pattern, tableInfo] of this.seededTables) {
@@ -402,17 +411,14 @@ export class StarBotTradingLogic {
       }
 
       // Check if this table lost in the last bet
-      const record = await this.betRecordService.getRecords(
-        pattern,
-        { sessionid: sessionId, limit: 1, order: [['id', 'DESC']] }
-      );
+      const records = await this.betRecordService.getRecords(pattern, { sessionid: sessionId });
 
-      if (record.length > 0) {
-        const lastRecord = record[0];
-        const resultField = `bet${lastBetLevel}Result`;
+      if (records.length > 0) {
+        const lastRecord = records[0];
+        const resultField = `${lastBetLevel === 1 ? 'first' : lastBetLevel === 2 ? 'second' : lastBetLevel === 3 ? 'third' : lastBetLevel === 4 ? 'fourth' : 'fifth'}betResult`;
 
-        // If result is 'loss', exclude this table
-        if ((lastRecord as any)[resultField] === 'loss') {
+        // If result is 'lost', exclude this table
+        if (lastRecord[resultField] === 'lost') {
           tableInfo.excludeFromTrading = true;
           console.log(`🚫 Excluded pattern ${pattern} due to loss at bet level ${lastBetLevel}`);
         }
@@ -427,52 +433,55 @@ export class StarBotTradingLogic {
    * - Update all seeded tables with result
    */
   private async updateBetResults(betLevel: number): Promise<void> {
-    console.log(`📈 Updating results for bet ${betLevel}...`);
+  console.log(`📈 Updating results for bet ${betLevel}...`);
 
-    try {
-      // Get the previously completed candle
-      const completedCandle = await this.derivCandleService.fetchPreviousCompletedCandle(
-        this.sessionSymbol!
-      );
+  try {
+    // Get the previously completed candle
+    const completedCandle = await this.derivCandleService.fetchPreviousCompletedCandle(
+      this.sessionSymbol!
+    );
 
-      if (!completedCandle) {
-        console.log('⚠️  No completed candle data available yet');
-        return;
-      }
-
-      // Update all seeded tables with the candle result
-      for (const [pattern, tableInfo] of this.seededTables) {
-        if (tableInfo.betLevel >= betLevel) {
-          // Determine if this bet won or lost
-          // (This logic depends on your specific trading rules)
-          const result = await this.determineBetResult(
-            pattern,
-            betLevel,
-            completedCandle,
-            tableInfo.trend
-          );
-
-          // Update database record
-          await this.updateBetRecordResult(
-            this.botState.activeSessionId!,
-            pattern,
-            betLevel,
-            result
-          );
-
-          console.log(`✅ Updated pattern ${pattern} bet ${betLevel}: ${result.result}`);
-
-          // Send bet result email for this pattern
-          await this.emailService.sendBetResultEmail(this.botState.activeSessionId!, betLevel, result.result, this.sessionSymbol!);
-        }
-      }
-    } catch (error) {
-      console.error(`❌ Error updating bet results:`, error);
-      await this.emailService.sendErrorEmail(error as Error, `Bet ${betLevel} results update`);
-      throw error;
+    if (!completedCandle) {
+      console.log('⚠️  No completed candle data available yet');
+      return;
     }
-  }
 
+    // Update all seeded tables with the candle result
+    for (const [pattern, tableInfo] of this.seededTables) {
+      if (tableInfo.betLevel >= betLevel) {
+        // Determine if this bet won or lost
+        const result = await this.determineBetResult(
+          pattern,
+          betLevel,
+          completedCandle,
+          tableInfo.trend
+        );
+
+        // Update database record
+        await this.updateBetRecordResult(
+          this.botState.activeSessionId!,
+          pattern,
+          betLevel,
+          result
+        );
+
+        console.log(`✅ Updated pattern ${pattern} bet ${betLevel}: ${result.result}`);
+        
+        // Send bet result email for this pattern
+        await this.emailService.sendBetResultEmail(
+          this.botState.activeSessionId!, 
+          betLevel, 
+          result.result === 'won' ? 'win' : 'loss', // Convert 'won'/'lost' to 'win'/'loss'
+          this.sessionSymbol!
+        );
+      }
+    }
+  } catch (error) {
+    console.error(`❌ Error updating bet results:`, error);
+    await this.emailService.sendErrorEmail(error as Error, `Bet ${betLevel} results update`);
+    throw error;
+  }
+}
   /**
    * Determine the result of a bet (win/loss)
    * This is where your specific trading logic goes
@@ -482,13 +491,43 @@ export class StarBotTradingLogic {
     betLevel: number,
     completedCandle: any,
     trend: 'uptrend' | 'downtrend'
-  ): Promise<{ result: 'win' | 'loss'; candleData: any }> {
-    // TODO: Implement your specific trading logic here
-    // For now, return a placeholder
+  ): Promise<{ result: 'won' | 'lost'; candleData: any }> {
+    // Get the expected candle color from the seeded pattern
+    const betLevelName = betLevel === 1 ? 'first' : betLevel === 2 ? 'second' : betLevel === 3 ? 'third' : betLevel === 4 ? 'fourth' : 'fifth';
+    
+    // For now, determine based on actual vs expected
+    // This should be enhanced with your specific trading rules
+    const actualColor = this.getCandleColor(completedCandle);
+    const expectedColor = this.getExpectedColorForPattern(pattern, betLevel);
+    
+    const result = actualColor === expectedColor ? 'won' : 'lost';
+    
     return {
-      result: Math.random() > 0.5 ? 'win' : 'loss',
+      result: result as 'won' | 'lost',
       candleData: completedCandle,
     };
+  }
+
+  /**
+   * Get expected candle color for a pattern and bet level
+   */
+  private getExpectedColorForPattern(pattern: CandlePattern, betLevel: number): string {
+    const patternStr = pattern.toString();
+    const expectedCandle = patternStr.charAt(betLevel - 1).toLowerCase();
+    return expectedCandle === 'g' ? 'green' : expectedCandle === 'r' ? 'red' : 'doji';
+  }
+
+  /**
+   * Get candle color from candle data
+   */
+  private getCandleColor(candle: { open: number; close: number }): 'green' | 'red' | 'doji' {
+    if (candle.close > candle.open) {
+      return 'green';
+    }
+    if (candle.close < candle.open) {
+      return 'red';
+    }
+    return 'doji';
   }
 
   /**
@@ -498,22 +537,19 @@ export class StarBotTradingLogic {
     sessionId: string,
     pattern: string,
     betLevel: number,
-    result: { result: 'win' | 'loss'; candleData: any }
+    result: { result: 'won' | 'lost'; candleData: any }
   ): Promise<void> {
-    const records = await this.betRecordService.getRecords(
-      pattern,
-      { sessionid: sessionId, limit: 1, order: [['id', 'DESC']] }
-    );
+    const records = await this.betRecordService.getRecords(pattern, { sessionid: sessionId });
 
     if (records.length > 0) {
       const record = records[0];
-      const resultField = `bet${betLevel}Result`;
-      const actualField = `bet${betLevel}actual`;
+      const resultField = `${betLevel === 1 ? 'first' : betLevel === 2 ? 'second' : betLevel === 3 ? 'third' : betLevel === 4 ? 'fourth' : 'fifth'}betResult`;
+      const actualField = `${betLevel === 1 ? 'first' : betLevel === 2 ? 'second' : betLevel === 3 ? 'third' : betLevel === 4 ? 'fourth' : 'fifth'}betactual`;
 
-      (record as any)[resultField] = result.result;
-      (record as any)[actualField] = result.candleData.close;
-
-      await record.save();
+      await this.betRecordService.updateRecord(pattern, record.id, {
+        [resultField]: result.result,
+        [actualField]: result.candleData.close,
+      });
     }
   }
 
@@ -525,21 +561,17 @@ export class StarBotTradingLogic {
     let highestLevel = 0;
 
     for (const pattern of Object.values(CandlePattern)) {
-      const records = await this.betRecordService.getRecords(
-        pattern,
-        { sessionid: sessionId, limit: 1, order: [['id', 'DESC']] }
-      );
+      const records = await this.betRecordService.getRecords(pattern, { sessionid: sessionId });
 
       if (records.length > 0) {
-        const record = records[0] as any;
+        const record = records[0];
 
         // Check which bet levels have been filled
-        for (let level = 5; level >= 1; level--) {
-          if (record[`bet${level}Amount`] !== null) {
-            highestLevel = Math.max(highestLevel, level);
-            break;
-          }
-        }
+        if (record.firstbetAmount !== null && record.firstbetAmount !== undefined) highestLevel = Math.max(highestLevel, 1);
+        if (record.secondbetAmount !== null && record.secondbetAmount !== undefined) highestLevel = Math.max(highestLevel, 2);
+        if (record.thirdbetAmount !== null && record.thirdbetAmount !== undefined) highestLevel = Math.max(highestLevel, 3);
+        if (record.fourthbetAmount !== null && record.fourthbetAmount !== undefined) highestLevel = Math.max(highestLevel, 4);
+        if (record.fifthbetAmount !== null && record.fifthbetAmount !== undefined) highestLevel = Math.max(highestLevel, 5);
       }
     }
 
@@ -560,18 +592,17 @@ export class StarBotTradingLogic {
 
       // Check each pattern table for all-win condition
       for (const pattern of Object.values(CandlePattern)) {
-        const records = await this.betRecordService.getRecords(
-          pattern,
-          { sessionid: sessionId, limit: 1, order: [['id', 'DESC']] }
-        );
+        const records = await this.betRecordService.getRecords(pattern, { sessionid: sessionId });
 
         if (records.length > 0) {
-          const record = records[0] as any;
+          const record = records[0];
 
           // Check if all 5 bets won
-          const allWins = ['bet1Result', 'bet2Result', 'bet3Result', 'bet4Result', 'bet5Result'].every(
-            field => record[field] === 'win'
-          );
+          const allWins = record.firstbetResult === 'won' &&
+                          record.secondbetResult === 'won' &&
+                          record.thirdbetResult === 'won' &&
+                          record.fourthbetResult === 'won' &&
+                          record.fifthbetResult === 'won';
 
           if (allWins) {
             sessionWon = true;
@@ -586,6 +617,14 @@ export class StarBotTradingLogic {
       await this.sessionService.updateSession(sessionId, { sessionresult: sessionResult });
       console.log(`📊 Session result: ${sessionResult}`);
 
+      // Update all bet records with session result
+      for (const pattern of Object.values(CandlePattern)) {
+        const records = await this.betRecordService.getRecords(pattern, { sessionid: sessionId });
+        for (const record of records) {
+          await this.betRecordService.updateSessionResult(pattern, record.id, sessionResult);
+        }
+      }
+
       // Reset for next session
       this.resetSession();
 
@@ -594,7 +633,7 @@ export class StarBotTradingLogic {
       await this.checkAndGenerateSignals();
 
       // Send session result email
-      await this.emailService.sendSessionResultEmail(sessionId, sessionResult, this.botState.activeSymbol!);
+      await this.emailService.sendSessionResultEmail(sessionId, sessionResult, this.botState.activeSymbol || 'unknown');
     } catch (error) {
       console.error('❌ Error evaluating session completion:', error);
       await this.emailService.sendErrorEmail(error as Error, 'Session completion evaluation');

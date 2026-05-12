@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import sequelize from '@/app/lib/database';
 import { StarBotTradingLogic } from '@/app/lib/tradinglogic';
 import { DerivDataCandleService } from '../../lib/services/DerivDataCandleService';
 
@@ -83,17 +82,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         console.log('📡 Trading triggered by Firebase:', body);
 
         // 3. Validate environment
-        const appId = parseInt(process.env.DERIV_APP_ID || '');
+        const appId = parseInt(process.env.DERIV_APP_ID || '1089');
         const apiToken = process.env.DERIV_API_TOKEN;
         
-        if (!appId || !apiToken) {
-            throw new Error('Missing Deriv credentials');
+        if (!apiToken) {
+            throw new Error('Missing Deriv API token');
         }
 
         // 4. Initialize Candle Service if not already initialized
         if (!candleService) {
             console.log('🕯️ Initializing DerivDataCandleService...');
-            candleService = new DerivDataCandleService(sequelize);
+            candleService = new DerivDataCandleService();
             await candleService.initialize();
             isCandleServiceInitialized = true;
             console.log('✅ Candle service initialized successfully');
@@ -101,7 +100,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
         // 5. Initialize StarBot if not exists
         if (!tradingBot) {
-            tradingBot = new StarBotTradingLogic(sequelize, {
+            tradingBot = new StarBotTradingLogic({
                 appId: appId,
                 token: apiToken,
                 wsUrl: process.env.DERIV_WS_URL || 'wss://ws.binaryws.com/websockets/v3'
@@ -153,13 +152,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 export async function DELETE(): Promise<NextResponse> {
     try {
         if (candleService) {
-            //candleService.closeConnection();
+            candleService.closeConnection();
             candleService = null;
             isCandleServiceInitialized = false;
         }
         
         if (tradingBot) {
-            // Add a close/cleanup method to your trading bot if needed
             tradingBot = null;
         }
         
@@ -197,9 +195,10 @@ export async function GET(): Promise<NextResponse> {
                 message: 'StarBot trading logic and candle service are ready to initialize',
                 ...status,
                 config: {
-                    derivAppId: process.env.DERIV_APP_ID || 'not set',
+                    derivAppId: process.env.DERIV_APP_ID || '1089',
                     derivWsUrl: process.env.DERIV_WS_URL || 'wss://ws.binaryws.com/websockets/v3',
-                    cronSecretRequired: !!process.env.CRON_SECRET
+                    cronSecretRequired: !!process.env.CRON_SECRET,
+                    supabaseConfigured: !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
                 },
                 timestamp: new Date().toISOString()
             });
@@ -216,6 +215,7 @@ export async function GET(): Promise<NextResponse> {
                 isInitialized: botState.isInitialized,
                 isWaitingForSignal: botState.isWaitingForSignal,
                 activeSessionId: botState.activeSessionId,
+                activeSymbol: botState.activeSymbol,
                 sessionStartTime: botState.sessionStartTime,
                 lastProcessedCandle: botState.lastProcessedCandle
             },

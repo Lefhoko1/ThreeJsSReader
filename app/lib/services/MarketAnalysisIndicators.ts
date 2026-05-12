@@ -1,6 +1,10 @@
-import { Sequelize, ModelCtor, Model, Op } from 'sequelize';
-import { createCandleModel } from '../models/Candle';
+import { createClient } from "@supabase/supabase-js";
 import { ALL_VOLATILITY_SYMBOLS } from '../constants/volatilitySymbols';
+
+// ─── Config ───────────────────────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const GRANULARITY = 1800; // 30 minutes
 
 export interface MarketSelectionResult {
   symbol: string;
@@ -18,7 +22,7 @@ export interface MarketSelectionResult {
 
 export class MarketAnalysisIndicators {
   private symbols = [...ALL_VOLATILITY_SYMBOLS];
-  private sequelize: Sequelize;
+  private supabase;
   
   // MT5 standard buffer sizes
   private readonly MAX_CANDLES = 500;
@@ -28,8 +32,11 @@ export class MarketAnalysisIndicators {
   private readonly ATR_PERIOD = 14;
   private readonly MIN_CANDLES_FOR_ATR = 20;
 
-  constructor(sequelize: Sequelize) {
-    this.sequelize = sequelize;
+  constructor() {
+    if (!SUPABASE_URL || !SUPABASE_KEY) {
+      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+    }
+    this.supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
   }
 
   async selectMarketForTrading(): Promise<MarketSelectionResult | null> {
@@ -288,25 +295,163 @@ export class MarketAnalysisIndicators {
     return sum / period;
   }
 
-  private async getRecentCandles(symbol: string, limit: number) {
-    const tableName = `${symbol.toLowerCase().replace('_', '')}_candles`;
-    const CandleModel = createCandleModel(this.sequelize, tableName);
-
-    const candleRows = await CandleModel.findAll({
-      where: {
-        timestamp: { [Op.lte]: new Date() }
-      },
-      order: [['timestamp', 'ASC']],  // ASC for proper buffer calculation
-      limit,
-    });
-
-    return candleRows.map(row => ({
-      timestamp: row.get('timestamp') as Date,
-      open: Number(row.get('open')),
-      high: Number(row.get('high')),
-      low: Number(row.get('low')),
-      close: Number(row.get('close')),
-      volume: row.get('volume') !== null ? Number(row.get('volume')) : undefined,
+  private async getRecentCandles(symbol: string, limit: number): Promise<Array<{
+    timestamp: Date;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume?: number;
+  }>> {
+    const tableName = symbol.toLowerCase();
+    
+    // Fetch candles from Supabase
+    const { data: candles, error } = await this.supabase
+      .from(tableName)
+      .select('datetime, open, high, low, close')
+      .order('epoch', { ascending: true })  // ASC for proper buffer calculation
+      .limit(limit);
+    
+    if (error) {
+      throw new Error(`Failed to fetch candles for "${tableName}": ${error.message}`);
+    }
+    
+    if (!candles || candles.length === 0) {
+      return [];
+    }
+    
+    // Map Supabase response to expected format
+    return candles.map(candle => ({
+      timestamp: new Date(candle.datetime),
+      open: parseFloat(candle.open),
+      high: parseFloat(candle.high),
+      low: parseFloat(candle.low),
+      close: parseFloat(candle.close),
+      volume: undefined // Volume not stored in your candle schema
     }));
+  }
+
+  /**
+   * Get all symbols with their current trend status
+   */
+  async getAllMarketStatus(): Promise<Map<string, {
+    trend: 'bullish' | 'bearish' | 'neutral';
+    strength: number;
+    ma5: number;
+    ma10: number;
+    atr: number;
+  }>> {
+    const marketStatus = new Map();
+    
+    const results = await Promise.all(
+      this.symbols.map(async (symbol) => {
+        try {
+          const analysis = await this.analyzeSymbolMT5(symbol);
+          if (analysis) {
+            return {
+              symbol,
+              status: {
+                trend: analysis.crossoverType,
+                strength: analysis.strength,
+                ma5: analysis.ma5Value,
+                ma10: analysis.ma10Value,
+                atr: analysis.atrValue
+              }
+            };
+          }
+          return null;
+        } catch (error) {
+          console.error(`Failed to get status for ${symbol}:`, error);
+          return null;
+        }
+      })
+    );
+    
+    for (const result of results) {
+      if (result) {
+        marketStatus.set(result.symbol, result.status);
+      }
+    }
+    
+    return marketStatus;
+  }
+
+  /**
+   * Get detailed analysis for a specific symbol
+   */
+  async getSymbolAnalysis(symbol: string): Promise<{
+    current: MarketSelectionResult | null;
+    historical: {
+      ma5: (number | null)[];
+      ma10: (number | null)[];
+      atr: (number | null)[];
+      crossoverPoints: Array<{ index: number; type: 'bullish' | 'bearish'; timestamp: Date }>;
+    };
+  } | null> {
+    try {
+      const candles = await this.getRecentCandles(symbol, this.MAX_CANDLES);
+      
+      if (candles.length < this.MIN_CANDLES) {
+        return null;
+      }
+      
+      const ma5Buffer = this.calculateSMABuffer(candles, this.MA_PERIOD_FAST);
+      const ma10Buffer = this.calculateSMABuffer(candles, this.MA_PERIOD_SLOW);
+      const atrBuffer = this.calculateATRBuffer(candles, this.ATR_PERIOD);
+      
+      // Find crossover points
+      const crossoverPoints: Array<{ index: number; type: 'bullish' | 'bearish'; timestamp: Date }> = [];
+      
+      for (let i = 2; i < candles.length; i++) {
+        const prevMA5 = ma5Buffer[i-1];
+        const prevMA10 = ma10Buffer[i-1];
+        const prev2MA5 = ma5Buffer[i-2];
+        const prev2MA10 = ma10Buffer[i-2];
+        const currentMA5 = ma5Buffer[i];
+        const currentMA10 = ma10Buffer[i];
+        
+        if (prevMA5 !== null && prevMA10 !== null && prev2MA5 !== null && prev2MA10 !== null && currentMA5 !== null && currentMA10 !== null) {
+          const wasBearishPrev = prevMA5 <= prevMA10;
+          const wasBearishPrev2 = prev2MA5 <= prev2MA10;
+          const isBullishNow = currentMA5 > currentMA10;
+          const bullishCrossover = wasBearishPrev && wasBearishPrev2 && isBullishNow;
+          
+          const wasBullishPrev = prevMA5 >= prevMA10;
+          const wasBullishPrev2 = prev2MA5 >= prev2MA10;
+          const isBearishNow = currentMA5 < currentMA10;
+          const bearishCrossover = wasBullishPrev && wasBullishPrev2 && isBearishNow;
+          
+          if (bullishCrossover) {
+            crossoverPoints.push({
+              index: i,
+              type: 'bullish',
+              timestamp: candles[i].timestamp
+            });
+          } else if (bearishCrossover) {
+            crossoverPoints.push({
+              index: i,
+              type: 'bearish',
+              timestamp: candles[i].timestamp
+            });
+          }
+        }
+      }
+      
+      // Get current analysis
+      const current = await this.analyzeSymbolMT5(symbol);
+      
+      return {
+        current,
+        historical: {
+          ma5: ma5Buffer,
+          ma10: ma10Buffer,
+          atr: atrBuffer,
+          crossoverPoints
+        }
+      };
+    } catch (error) {
+      console.error(`Failed to get detailed analysis for ${symbol}:`, error);
+      return null;
+    }
   }
 }

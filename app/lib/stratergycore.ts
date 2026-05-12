@@ -1,6 +1,5 @@
 import { BetRecordService } from './services/BetRecordService';
 import { DerivDataCandleService } from './services/DerivDataCandleService';
-import sequelize from './database';
 import { UptrendPatterns, DowntrendPatterns } from './strategyCombinations';
 
 type TradeDirection = 'CALL' | 'PUT' | 'NONE';
@@ -11,8 +10,13 @@ export interface BetCalculationResult {
 }
 
 export class StrategyCore {
-  private betRecordService = new BetRecordService();
-  private derivDataCandleService = new DerivDataCandleService(sequelize);
+  private betRecordService: BetRecordService;
+  private derivDataCandleService: DerivDataCandleService;
+
+  constructor() {
+    this.betRecordService = new BetRecordService();
+    this.derivDataCandleService = new DerivDataCandleService();
+  }
 
   /**
    * Calculate the first bet amount and direction for a seeded session.
@@ -71,10 +75,10 @@ export class StrategyCore {
     for (const pattern of patterns) {
       const records = await this.betRecordService.getRecords(pattern, { sessionid });
       for (const record of records) {
-        const expected = String(record.get('firstbetexpectedcandle') ?? '').toLowerCase();
+        const expected = String(record.firstbetexpectedcandle ?? '').toLowerCase();
         const result = this.getFirstBetResult(actualCandleColor, expected);
 
-        await this.betRecordService.updateFirstBet(pattern, Number(record.get('id')),
+        await this.betRecordService.updateFirstBet(pattern, Number(record.id),
           {
             firstbetactual: actualCandleColor,
             firstbetResult: result,
@@ -104,10 +108,10 @@ export class StrategyCore {
     for (const pattern of patterns) {
       const records = await this.betRecordService.getRecords(pattern, { sessionid });
       for (const record of records) {
-        const expected = String(record.get('secondbetexpectedcandle') ?? '').toLowerCase();
+        const expected = String(record.secondbetexpectedcandle ?? '').toLowerCase();
         const result = this.getSecondBetResult(actualCandleColor, expected);
 
-        await this.betRecordService.updateSecondBet(pattern, Number(record.get('id')),
+        await this.betRecordService.updateSecondBet(pattern, Number(record.id),
           {
             secondbetactual: actualCandleColor,
             secondbetResult: result,
@@ -137,10 +141,10 @@ export class StrategyCore {
     for (const pattern of patterns) {
       const records = await this.betRecordService.getRecords(pattern, { sessionid });
       for (const record of records) {
-        const expected = String(record.get('thirdbetexpectedcandle') ?? '').toLowerCase();
+        const expected = String(record.thirdbetexpectedcandle ?? '').toLowerCase();
         const result = this.getThirdBetResult(actualCandleColor, expected);
 
-        await this.betRecordService.updateThirdBet(pattern, Number(record.get('id')),
+        await this.betRecordService.updateThirdBet(pattern, Number(record.id),
           {
             thirdbetactual: actualCandleColor,
             thirdbetResult: result,
@@ -170,10 +174,10 @@ export class StrategyCore {
     for (const pattern of patterns) {
       const records = await this.betRecordService.getRecords(pattern, { sessionid });
       for (const record of records) {
-        const expected = String(record.get('fourthbetexpectedcandle') ?? '').toLowerCase();
+        const expected = String(record.fourthbetexpectedcandle ?? '').toLowerCase();
         const result = this.getFourthBetResult(actualCandleColor, expected);
 
-        await this.betRecordService.updateFourthBet(pattern, Number(record.get('id')),
+        await this.betRecordService.updateFourthBet(pattern, Number(record.id),
           {
             fourthbetactual: actualCandleColor,
             fourthbetResult: result,
@@ -203,10 +207,10 @@ export class StrategyCore {
     for (const pattern of patterns) {
       const records = await this.betRecordService.getRecords(pattern, { sessionid });
       for (const record of records) {
-        const expected = String(record.get('fifthbetexpectedcandle') ?? '').toLowerCase();
+        const expected = String(record.fifthbetexpectedcandle ?? '').toLowerCase();
         const result = this.getFifthBetResult(actualCandleColor, expected);
 
-        await this.betRecordService.updateFifthBet(pattern, Number(record.get('id')),
+        await this.betRecordService.updateFifthBet(pattern, Number(record.id),
           {
             fifthbetactual: actualCandleColor,
             fifthbetResult: result,
@@ -214,6 +218,60 @@ export class StrategyCore {
         );
       }
     }
+  }
+
+  /**
+   * Update session result based on all bet results for a session
+   */
+  async updateSessionResult(
+    sessionid: string,
+    trend: 'uptrend' | 'downtrend'
+  ): Promise<'win' | 'loss' | 'pending'> {
+    const patterns = trend === 'uptrend' ? Object.values(UptrendPatterns) : Object.values(DowntrendPatterns);
+    
+    let totalWins = 0;
+    let totalLosses = 0;
+    let totalPending = 0;
+
+    for (const pattern of patterns) {
+      const records = await this.betRecordService.getRecords(pattern, { sessionid });
+      for (const record of records) {
+        // Check each bet level
+        const betLevels = ['first', 'second', 'third', 'fourth', 'fifth'];
+        for (const level of betLevels) {
+          const result = record[`${level}betResult`];
+          if (result === 'won') {
+            totalWins++;
+          } else if (result === 'lost') {
+            totalLosses++;
+          } else if (!result) {
+            totalPending++;
+          }
+        }
+      }
+    }
+
+    // Determine session result
+    let sessionResult: 'win' | 'loss' | 'pending' = 'pending';
+    
+    if (totalPending === 0) {
+      // If any bet was won, session is win (following martingale logic where one win covers all)
+      if (totalWins > 0) {
+        sessionResult = 'win';
+      } else if (totalLosses > 0) {
+        sessionResult = 'loss';
+      }
+    }
+
+    // Update all records with session result
+    for (const pattern of patterns) {
+      const records = await this.betRecordService.getRecords(pattern, { sessionid });
+      for (const record of records) {
+        await this.betRecordService.updateSessionResult(pattern, Number(record.id), sessionResult);
+      }
+    }
+
+    return sessionResult;
   }
 
   private getCandleColor(candle: { open: number; close: number }): 'green' | 'red' | 'doji' {
@@ -261,7 +319,11 @@ export class StrategyCore {
     return 'lost';
   }
 
-  private async calculateBetForLevel(sessionid: string, trend: 'uptrend' | 'downtrend', level: 'first' | 'second' | 'third' | 'fourth' | 'fifth'): Promise<BetCalculationResult> {
+  private async calculateBetForLevel(
+    sessionid: string, 
+    trend: 'uptrend' | 'downtrend', 
+    level: 'first' | 'second' | 'third' | 'fourth' | 'fifth'
+  ): Promise<BetCalculationResult> {
     const patterns = trend === 'uptrend' ? Object.values(UptrendPatterns) : Object.values(DowntrendPatterns);
 
     let greenTotal = 0;
@@ -270,14 +332,15 @@ export class StrategyCore {
     for (const pattern of patterns) {
       const records = await this.betRecordService.getRecords(pattern, { sessionid });
       for (const record of records) {
-        const expected = String(record.get(`${level}betexpectedcandle`) ?? '').toLowerCase();
-        const amountValue = Number(record.get(`${level}betAmount`));
+        const expected = String(record[`${level}betexpectedcandle`] ?? '').toLowerCase();
+        const amountValue = Number(record[`${level}betAmount`]);
         const amount = Number.isFinite(amountValue) ? amountValue : 0;
 
         if (!amount || amount <= 0) {
           continue;
         }
 
+        // Handle different expected value formats (g/green or r/red)
         if (expected === 'g' || expected === 'green') {
           greenTotal += amount;
         } else if (expected === 'r' || expected === 'red') {
@@ -296,5 +359,105 @@ export class StrategyCore {
     }
 
     return { betAmount, direction };
+  }
+
+  /**
+   * Get detailed bet statistics for a session
+   */
+  async getSessionStatistics(sessionid: string, trend: 'uptrend' | 'downtrend'): Promise<{
+    totalBets: number;
+    wonBets: number;
+    lostBets: number;
+    pendingBets: number;
+    winRate: number;
+    totalAmount: number;
+    wonAmount: number;
+    lostAmount: number;
+    byLevel: {
+      first: { won: number; lost: number; pending: number; amount: number };
+      second: { won: number; lost: number; pending: number; amount: number };
+      third: { won: number; lost: number; pending: number; amount: number };
+      fourth: { won: number; lost: number; pending: number; amount: number };
+      fifth: { won: number; lost: number; pending: number; amount: number };
+    };
+  }> {
+    const patterns = trend === 'uptrend' ? Object.values(UptrendPatterns) : Object.values(DowntrendPatterns);
+    
+    const stats = {
+      totalBets: 0,
+      wonBets: 0,
+      lostBets: 0,
+      pendingBets: 0,
+      winRate: 0,
+      totalAmount: 0,
+      wonAmount: 0,
+      lostAmount: 0,
+      byLevel: {
+        first: { won: 0, lost: 0, pending: 0, amount: 0 },
+        second: { won: 0, lost: 0, pending: 0, amount: 0 },
+        third: { won: 0, lost: 0, pending: 0, amount: 0 },
+        fourth: { won: 0, lost: 0, pending: 0, amount: 0 },
+        fifth: { won: 0, lost: 0, pending: 0, amount: 0 }
+      }
+    };
+
+    const betLevels = ['first', 'second', 'third', 'fourth', 'fifth'] as const;
+
+    for (const pattern of patterns) {
+      const records = await this.betRecordService.getRecords(pattern, { sessionid });
+      for (const record of records) {
+        for (const level of betLevels) {
+          const result = record[`${level}betResult`];
+          const amount = Number(record[`${level}betAmount`]) || 0;
+          
+          if (amount > 0) {
+            stats.totalAmount += amount;
+            stats.byLevel[level].amount += amount;
+          }
+          
+          if (result === 'won') {
+            stats.wonBets++;
+            stats.wonAmount += amount;
+            stats.byLevel[level].won++;
+          } else if (result === 'lost') {
+            stats.lostBets++;
+            stats.lostAmount += amount;
+            stats.byLevel[level].lost++;
+          } else if (!result) {
+            stats.pendingBets++;
+            stats.byLevel[level].pending++;
+          }
+        }
+      }
+    }
+
+    stats.totalBets = stats.wonBets + stats.lostBets + stats.pendingBets;
+    stats.winRate = stats.totalBets > 0 ? (stats.wonBets / (stats.wonBets + stats.lostBets)) * 100 : 0;
+
+    return stats;
+  }
+
+  /**
+   * Reset all bets for a session (clear results but keep amounts)
+   */
+  async resetSession(sessionid: string, trend: 'uptrend' | 'downtrend'): Promise<void> {
+    const patterns = trend === 'uptrend' ? Object.values(UptrendPatterns) : Object.values(DowntrendPatterns);
+    const betLevels = ['first', 'second', 'third', 'fourth', 'fifth'] as const;
+
+    for (const pattern of patterns) {
+      const records = await this.betRecordService.getRecords(pattern, { sessionid });
+      for (const record of records) {
+        const updates: any = {
+          sessionresult: null
+        };
+        
+        for (const level of betLevels) {
+          updates[`${level}betResult`] = null;
+          updates[`${level}betactual`] = null;
+        }
+        
+        await this.betRecordService.updateRecord(pattern, Number(record.id), updates);
+      }
+    }
   }
 }
