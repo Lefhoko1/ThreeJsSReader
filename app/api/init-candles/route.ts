@@ -6,9 +6,14 @@ const candleService = new DerivDataCandleService();
 const emailService = new EmailService();
 
 export async function POST(request: NextRequest) {
-  try { 
-const cronSecret = 'a3f8c2e1b7d4e9f0c6a2b5d8e1f4a7c0b3d6e9f2a5b8c1d4e7f0a3b6c9d2e5';;
-    if (cronSecret !== 'a3f8c2e1b7d4e9f0c6a2b5d8e1f4a7c0b3d6e9f2a5b8c1d4e7f0a3b6c9d2e5') {
+  try {
+    // Read the secret from the request header
+    const cronSecret = request.headers.get('x-cron-secret');
+    const expectedSecret = 'a3f8c2e1b7d4e9f0c6a2b5d8e1f4a7c0b3d6e9f2a5b8c1d4e7f0a3b6c9d2e5';
+    
+    // Compare header value with expected secret
+    if (cronSecret !== expectedSecret) {
+      console.log(`Unauthorized attempt. Received: ${cronSecret}`);
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
     
