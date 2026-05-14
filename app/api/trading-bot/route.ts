@@ -64,13 +64,16 @@ let tradingBot: StarBotTradingLogic | null = null;
 let candleService: DerivDataCandleService | null = null;
 let isCandleServiceInitialized = false;
 
+// Hardcoded secret for authorization
+const EXPECTED_SECRET = 'a3f8c2e1b7d4e9f0c6a2b5d8e1f4a7c0b3d6e9f2a5b8c1d4e7f0a3b6c9d2e5';
+
 export async function POST(request: NextRequest): Promise<NextResponse> {
     const startTime = Date.now();
     
     try {
-        // 1. Authentication
+        // 1. Authentication - using hardcoded secret
         const cronSecret = request.headers.get('x-cron-secret');
-        if (cronSecret !== process.env.CRON_SECRET) {
+        if (cronSecret !== EXPECTED_SECRET) {
             return NextResponse.json(
                 { success: false, error: 'Unauthorized', timestamp: new Date().toISOString() },
                 { status: 401 }
@@ -197,8 +200,8 @@ export async function GET(): Promise<NextResponse> {
                 config: {
                     derivAppId: process.env.DERIV_APP_ID || '1089',
                     derivWsUrl: process.env.DERIV_WS_URL || 'wss://ws.binaryws.com/websockets/v3',
-                    cronSecretRequired: !!process.env.CRON_SECRET,
-                    supabaseConfigured: !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+                    cronSecretRequired: 'Hardcoded - no env var needed',
+                    supabaseConfigured: false
                 },
                 timestamp: new Date().toISOString()
             });
