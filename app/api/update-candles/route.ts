@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { DerivDataCandleService } from '../../lib/services/DerivDataCandleService';
+import { EmailService } from '../../lib/services/EmailService';
+
+const candleService = new DerivDataCandleService();
+const emailService = new EmailService();
 
 export async function POST(request: NextRequest) {
   try {
@@ -9,9 +13,13 @@ export async function POST(request: NextRequest) {
     }
 
     console.log('🕯️ Updating latest candles...');
-    const service = new DerivDataCandleService();
-    await service.createTables(); // Ensure JSON files exist
-    const result = await service.updateLatestCandles(); // Only fetch new candles
+    await candleService.createTables();
+    const result = await candleService.updateLatestCandles();
+    
+    // Send email notification if new candles were added
+    if (result.totalAdded > 0) {
+      await emailService.sendDataUpdateEmail(result);
+    }
     
     return NextResponse.json({ 
       success: true, 
@@ -22,6 +30,7 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error('❌ Error:', error);
+    await emailService.sendErrorEmail(error as Error, 'Candle update');
     return NextResponse.json(
       { error: 'Failed to update candles', details: String(error) }, 
       { status: 500 }
