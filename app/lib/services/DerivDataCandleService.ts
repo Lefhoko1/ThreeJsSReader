@@ -56,14 +56,27 @@ export class DerivDataCandleService {
   }
 
   /**
-   * Ensure data directory exists
+   * Ensure data directory exists - with Vercel fallback
    */
   private async ensureDataDirectory(): Promise<void> {
-    try {
-      await fs.access(this.dataDir);
-    } catch {
-      await fs.mkdir(this.dataDir, { recursive: true });
+    const possiblePaths = [
+      this.dataDir,
+      path.join('/tmp', 'data', 'candles'),  // Vercel fallback
+      path.join(process.cwd(), 'data', 'candles')
+    ];
+    
+    for (const dirPath of possiblePaths) {
+      try {
+        await fs.mkdir(dirPath, { recursive: true });
+        this.dataDir = dirPath;
+        console.log(`✅ Using data directory: ${this.dataDir}`);
+        return;
+      } catch (error) {
+        console.log(`Failed to create ${dirPath}:`, error);
+      }
     }
+    
+    throw new Error('Could not create data directory in any location');
   }
 
   /**
