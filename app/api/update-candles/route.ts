@@ -1,38 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { DerivDataCandleService } from '../../lib/services/DerivDataCandleService';
+import { StarBotTradingLogic } from '../../lib/tradinglogic';
+import { DerivTradingService } from '../../lib/services/DerivTradingService';
 import { EmailService } from '../../lib/services/EmailService';
 
-const candleService = new DerivDataCandleService();
 const emailService = new EmailService();
+const derivConfig = {
+  appId: parseInt(process.env.DERIV_APP_ID || '1089', 10),
+  token: process.env.DERIV_TOKEN || '',
+  wsUrl: 'wss://ws.binaryws.com/websockets/v3'
+};
+const tradingBot = new StarBotTradingLogic(derivConfig);
+const derivTradingService = new DerivTradingService(derivConfig);
 
 export async function POST(request: NextRequest) {
   try {
     const cronSecret = request.headers.get('x-cron-secret');
-    if (cronSecret !== process.env.CRON_SECRET) {
+    const expectedSecret = 'a3f8c2e1b7d4e9f0c6a2b5d8e1f4a7c0b3d6e9f2a5b8c1d4e7f0a3b6c9d2e5';
+    
+    if (cronSecret !== expectedSecret) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    console.log('🕯️ Updating latest candles...');
-    await candleService.createTables();
-    const result = await candleService.updateLatestCandles();
-    
-    // Send email notification if new candles were added
-    if (result.totalAdded > 0) {
-      await emailService.sendDataUpdateEmail(result);
-    }
+    console.log('🤖 Processing trading cycle...');
+    await tradingBot.processTradingCycle();
     
     return NextResponse.json({ 
       success: true, 
-      message: 'Latest candles updated successfully',
-      totalAdded: result.totalAdded,
-      results: result.results,
+      message: 'Trading cycle processed successfully',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
     console.error('❌ Error:', error);
-    await emailService.sendErrorEmail(error as Error, 'Candle update');
+    await emailService.sendErrorEmail(error as Error, 'Trading cycle');
     return NextResponse.json(
-      { error: 'Failed to update candles', details: String(error) }, 
+      { error: 'Failed to process trading cycle', details: String(error) }, 
       { status: 500 }
     );
   }
