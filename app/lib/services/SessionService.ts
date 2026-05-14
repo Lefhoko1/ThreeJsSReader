@@ -1,19 +1,9 @@
-import { createClient } from "@supabase/supabase-js";
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 // ─── Config ───────────────────────────────────────────────────────
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-// Session table schema
-const SESSIONS_SCHEMA = `
-  id                BIGSERIAL   PRIMARY KEY,
-  sessionid         UUID        NOT NULL UNIQUE,
-  symbol            TEXT        NOT NULL,
-  sessionresult     TEXT,
-  firstbetAmount    DECIMAL(10,2) NOT NULL,
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-`;
+// Data directory for storing sessions
+const DATA_DIR = path.join(process.cwd(), 'data', 'sessions');
 
 export interface Session {
   id: number;
@@ -25,34 +15,97 @@ export interface Session {
   updated_at: Date;
 }
 
+export interface SessionData {
+  id: number;
+  sessionid: string;
+  symbol: string;
+  sessionresult?: string | null;
+  firstbetAmount: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export class SessionService {
-  private supabase;
   private readonly TABLE_NAME = 'sessions';
+  private dataDir: string;
+  private filePath: string;
 
   constructor() {
-    if (!SUPABASE_URL || !SUPABASE_KEY) {
-      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-    }
-    this.supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+    this.dataDir = DATA_DIR;
+    this.filePath = path.join(this.dataDir, `${this.TABLE_NAME}.json`);
+    this.ensureDataDirectory();
   }
 
   /**
-   * Ensure sessions table exists (like ensureTable in your candle sync)
+   * Ensure data directory exists
+   */
+  private async ensureDataDirectory(): Promise<void> {
+    try {
+      await fs.access(this.dataDir);
+    } catch {
+      await fs.mkdir(this.dataDir, { recursive: true });
+    }
+  }
+
+  /**
+   * Ensure sessions file exists
+   */
+  private async ensureFile(): Promise<void> {
+    try {
+      await fs.access(this.filePath);
+    } catch {
+      // Create empty array if file doesn't exist
+      await this.saveSessions([]);
+    }
+  }
+
+  /**
+   * Load sessions from JSON file
+   */
+  private async loadSessions(): Promise<Session[]> {
+    try {
+      const data = await fs.readFile(this.filePath, 'utf-8');
+      const sessionsData: SessionData[] = JSON.parse(data);
+      // Convert string dates back to Date objects
+      return sessionsData.map(session => ({
+        ...session,
+        created_at: new Date(session.created_at),
+        updated_at: new Date(session.updated_at)
+      }));
+    } catch (error: any) {
+      if (error.code === 'ENOENT') {
+        return [];
+      }
+      throw new Error(`Failed to load sessions: ${error.message}`);
+    }
+  }
+
+  /**
+   * Save sessions to JSON file
+   */
+  private async saveSessions(sessions: Session[]): Promise<void> {
+    const sessionsData: SessionData[] = sessions.map(session => ({
+      ...session,
+      created_at: session.created_at.toISOString(),
+      updated_at: session.updated_at.toISOString()
+    }));
+    await fs.writeFile(this.filePath, JSON.stringify(sessionsData, null, 2), 'utf-8');
+  }
+
+  /**
+   * Get next ID for a session
+   */
+  private async getNextId(): Promise<number> {
+    const sessions = await this.loadSessions();
+    if (sessions.length === 0) return 1;
+    return Math.max(...sessions.map(s => s.id)) + 1;
+  }
+
+  /**
+   * Ensure sessions table exists (creates JSON file if needed)
    */
   private async ensureTable(): Promise<void> {
-    const { error } = await this.supabase.rpc('execute_sql', {
-      sql: `
-        CREATE TABLE IF NOT EXISTS ${this.TABLE_NAME} (
-          ${SESSIONS_SCHEMA}
-        );
-        CREATE INDEX IF NOT EXISTS idx_sessions_sessionid ON ${this.TABLE_NAME} (sessionid);
-        CREATE INDEX IF NOT EXISTS idx_sessions_symbol ON ${this.TABLE_NAME} (symbol);
-        CREATE INDEX IF NOT EXISTS idx_sessions_sessionresult ON ${this.TABLE_NAME} (sessionresult);
-        CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON ${this.TABLE_NAME} (created_at DESC);
-      `,
-    });
-    
-    if (error) throw new Error(`Table creation failed for "${this.TABLE_NAME}": ${error.message}`);
+    await this.ensureFile();
   }
 
   /**
@@ -61,21 +114,23 @@ export class SessionService {
   async createSession(data: { sessionid: string; symbol: string; sessionresult?: string | null; firstbetAmount: number }): Promise<Session> {
     await this.ensureTable();
     
-    const { data: session, error } = await this.supabase
-      .from(this.TABLE_NAME)
-      .insert({
-        sessionid: data.sessionid,
-        symbol: data.symbol,
-        sessionresult: data.sessionresult || null,
-        firstbetAmount: data.firstbetAmount,
-        created_at: new Date(),
-        updated_at: new Date()
-      })
-      .select()
-      .single();
+    const sessions = await this.loadSessions();
+    const now = new Date();
     
-    if (error) throw new Error(`Create session failed: ${error.message}`);
-    return session;
+    const newSession: Session = {
+      id: await this.getNextId(),
+      sessionid: data.sessionid,
+      symbol: data.symbol,
+      sessionresult: data.sessionresult || null,
+      firstbetAmount: data.firstbetAmount,
+      created_at: now,
+      updated_at: now
+    };
+    
+    sessions.push(newSession);
+    await this.saveSessions(sessions);
+    
+    return newSession;
   }
 
   /**
@@ -84,14 +139,10 @@ export class SessionService {
   async getSessionById(sessionid: string): Promise<Session | null> {
     await this.ensureTable();
     
-    const { data: session, error } = await this.supabase
-      .from(this.TABLE_NAME)
-      .select('*')
-      .eq('sessionid', sessionid)
-      .single();
+    const sessions = await this.loadSessions();
+    const session = sessions.find(s => s.sessionid === sessionid);
     
-    if (error && error.code !== 'PGRST116') throw error;
-    return session;
+    return session || null;
   }
 
   /**
@@ -106,31 +157,45 @@ export class SessionService {
   }): Promise<Session[]> {
     await this.ensureTable();
     
-    let query = this.supabase.from(this.TABLE_NAME).select('*');
+    let sessions = await this.loadSessions();
     
+    // Apply filters
     if (options?.symbol) {
-      query = query.eq('symbol', options.symbol);
+      sessions = sessions.filter(s => s.symbol === options.symbol);
     }
     if (options?.sessionresult) {
-      query = query.eq('sessionresult', options.sessionresult);
-    }
-    if (options?.limit) {
-      query = query.limit(options.limit);
-    }
-    if (options?.offset) {
-      query = query.range(options.offset, options.offset + (options.limit || 10) - 1);
-    }
-    if (options?.order && options.order.length > 0) {
-      const [column, direction] = options.order[0];
-      query = query.order(column, { ascending: direction === 'ASC' });
-    } else {
-      // Default order by created_at descending
-      query = query.order('created_at', { ascending: false });
+      sessions = sessions.filter(s => s.sessionresult === options.sessionresult);
     }
     
-    const { data: sessions, error } = await query;
-    if (error) throw new Error(`Get sessions failed: ${error.message}`);
-    return sessions || [];
+    // Apply sorting
+    if (options?.order && options.order.length > 0) {
+      const [column, direction] = options.order[0];
+      const sortDirection = direction === 'DESC' ? -1 : 1;
+      sessions.sort((a, b) => {
+        const aVal = a[column as keyof Session];
+        const bVal = b[column as keyof Session];
+        
+        if (aVal === undefined || aVal === null) return 1;
+        if (bVal === undefined || bVal === null) return -1;
+        
+        if (aVal < bVal) return -sortDirection;
+        if (aVal > bVal) return sortDirection;
+        return 0;
+      });
+    } else {
+      // Default order by created_at descending
+      sessions.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+    }
+    
+    // Apply pagination
+    if (options?.offset !== undefined) {
+      const limit = options?.limit || 10;
+      sessions = sessions.slice(options.offset, options.offset + limit);
+    } else if (options?.limit) {
+      sessions = sessions.slice(0, options.limit);
+    }
+    
+    return sessions;
   }
 
   /**
@@ -143,24 +208,28 @@ export class SessionService {
   }): Promise<Session[]> {
     await this.ensureTable();
     
-    let query = this.supabase
-      .from(this.TABLE_NAME)
-      .select('*')
-      .eq('symbol', symbol);
+    let sessions = await this.loadSessions();
     
+    // Filter by symbol
+    sessions = sessions.filter(s => s.symbol === symbol);
+    
+    // Filter by session result
     if (options?.sessionresult) {
-      query = query.eq('sessionresult', options.sessionresult);
-    }
-    if (options?.limit) {
-      query = query.limit(options.limit);
-    }
-    if (options?.offset) {
-      query = query.range(options.offset, options.offset + (options.limit || 10) - 1);
+      sessions = sessions.filter(s => s.sessionresult === options.sessionresult);
     }
     
-    const { data: sessions, error } = await query.order('created_at', { ascending: false });
-    if (error) throw new Error(`Get sessions by symbol failed: ${error.message}`);
-    return sessions || [];
+    // Sort by created_at descending
+    sessions.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+    
+    // Apply pagination
+    if (options?.offset !== undefined) {
+      const limit = options?.limit || 10;
+      sessions = sessions.slice(options.offset, options.offset + limit);
+    } else if (options?.limit) {
+      sessions = sessions.slice(0, options.limit);
+    }
+    
+    return sessions;
   }
 
   /**
@@ -169,18 +238,19 @@ export class SessionService {
   async updateSession(sessionid: string, updates: Partial<{ symbol: string; sessionresult: string | null; firstbetAmount: number }>): Promise<Session | null> {
     await this.ensureTable();
     
-    const { data: session, error } = await this.supabase
-      .from(this.TABLE_NAME)
-      .update({
-        ...updates,
-        updated_at: new Date()
-      })
-      .eq('sessionid', sessionid)
-      .select()
-      .single();
+    const sessions = await this.loadSessions();
+    const index = sessions.findIndex(s => s.sessionid === sessionid);
     
-    if (error && error.code !== 'PGRST116') throw error;
-    return session;
+    if (index === -1) return null;
+    
+    sessions[index] = {
+      ...sessions[index],
+      ...updates,
+      updated_at: new Date()
+    };
+    
+    await this.saveSessions(sessions);
+    return sessions[index];
   }
 
   /**
@@ -196,13 +266,15 @@ export class SessionService {
   async deleteSession(sessionid: string): Promise<boolean> {
     await this.ensureTable();
     
-    const { error, count } = await this.supabase
-      .from(this.TABLE_NAME)
-      .delete()
-      .eq('sessionid', sessionid);
+    const sessions = await this.loadSessions();
+    const filteredSessions = sessions.filter(s => s.sessionid !== sessionid);
     
-    if (error) throw new Error(`Delete session failed: ${error.message}`);
-    return (count || 0) > 0;
+    if (filteredSessions.length === sessions.length) {
+      return false;
+    }
+    
+    await this.saveSessions(filteredSessions);
+    return true;
   }
 
   /**
@@ -211,13 +283,14 @@ export class SessionService {
   async deleteSessionsBySymbol(symbol: string): Promise<number> {
     await this.ensureTable();
     
-    const { error, count } = await this.supabase
-      .from(this.TABLE_NAME)
-      .delete()
-      .eq('symbol', symbol);
+    const sessions = await this.loadSessions();
+    const initialCount = sessions.length;
+    const filteredSessions = sessions.filter(s => s.symbol !== symbol);
     
-    if (error) throw new Error(`Delete sessions by symbol failed: ${error.message}`);
-    return count || 0;
+    const deletedCount = initialCount - filteredSessions.length;
+    await this.saveSessions(filteredSessions);
+    
+    return deletedCount;
   }
 
   /**
@@ -234,20 +307,19 @@ export class SessionService {
   }> {
     await this.ensureTable();
     
-    let query = this.supabase.from(this.TABLE_NAME).select('*');
+    let sessions = await this.loadSessions();
+    
+    // Filter by symbol if provided
     if (symbol) {
-      query = query.eq('symbol', symbol);
+      sessions = sessions.filter(s => s.symbol === symbol);
     }
     
-    const { data: sessions, error } = await query;
-    if (error) throw new Error(`Get session stats failed: ${error.message}`);
+    const totalSessions = sessions.length;
+    const successfulSessions = sessions.filter(s => s.sessionresult === 'win').length;
+    const failedSessions = sessions.filter(s => s.sessionresult === 'loss').length;
+    const pendingSessions = sessions.filter(s => !s.sessionresult).length;
     
-    const totalSessions = sessions?.length || 0;
-    const successfulSessions = sessions?.filter(s => s.sessionresult === 'win').length || 0;
-    const failedSessions = sessions?.filter(s => s.sessionresult === 'loss').length || 0;
-    const pendingSessions = sessions?.filter(s => !s.sessionresult).length || 0;
-    
-    const totalFirstBetAmount = sessions?.reduce((sum, s) => sum + (s.firstbetAmount || 0), 0) || 0;
+    const totalFirstBetAmount = sessions.reduce((sum, s) => sum + (s.firstbetAmount || 0), 0);
     
     return {
       totalSessions,
@@ -269,18 +341,20 @@ export class SessionService {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - days);
     
-    let query = this.supabase
-      .from(this.TABLE_NAME)
-      .select('*')
-      .gte('created_at', cutoffDate.toISOString());
+    let sessions = await this.loadSessions();
     
+    // Filter by date
+    sessions = sessions.filter(s => s.created_at >= cutoffDate);
+    
+    // Filter by symbol if provided
     if (symbol) {
-      query = query.eq('symbol', symbol);
+      sessions = sessions.filter(s => s.symbol === symbol);
     }
     
-    const { data: sessions, error } = await query.order('created_at', { ascending: false });
-    if (error) throw new Error(`Get recent sessions failed: ${error.message}`);
-    return sessions || [];
+    // Sort by created_at descending
+    sessions.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+    
+    return sessions;
   }
 
   /**
@@ -288,7 +362,7 @@ export class SessionService {
    */
   async createTable(): Promise<void> {
     await this.ensureTable();
-    console.log('Sessions table created or updated.');
+    console.log('Sessions JSON file created or verified.');
   }
 
   /**
@@ -297,13 +371,8 @@ export class SessionService {
   async sessionExists(sessionid: string): Promise<boolean> {
     await this.ensureTable();
     
-    const { count, error } = await this.supabase
-      .from(this.TABLE_NAME)
-      .select('*', { count: 'exact', head: true })
-      .eq('sessionid', sessionid);
-    
-    if (error) throw new Error(`Check session exists failed: ${error.message}`);
-    return (count || 0) > 0;
+    const sessions = await this.loadSessions();
+    return sessions.some(s => s.sessionid === sessionid);
   }
 
   /**
@@ -312,21 +381,100 @@ export class SessionService {
   async batchCreateSessions(sessions: Array<{ sessionid: string; symbol: string; sessionresult?: string | null; firstbetAmount: number }>): Promise<Session[]> {
     await this.ensureTable();
     
-    const sessionsWithTimestamps = sessions.map(session => ({
-      sessionid: session.sessionid,
-      symbol: session.symbol,
-      sessionresult: session.sessionresult || null,
-      firstbetAmount: session.firstbetAmount,
-      created_at: new Date(),
-      updated_at: new Date()
+    const existingSessions = await this.loadSessions();
+    const now = new Date();
+    const newSessions: Session[] = [];
+    
+    for (const sessionData of sessions) {
+      const newId = await this.getNextId();
+      const newSession: Session = {
+        id: newId,
+        sessionid: sessionData.sessionid,
+        symbol: sessionData.symbol,
+        sessionresult: sessionData.sessionresult || null,
+        firstbetAmount: sessionData.firstbetAmount,
+        created_at: now,
+        updated_at: now
+      };
+      newSessions.push(newSession);
+    }
+    
+    const allSessions = [...existingSessions, ...newSessions];
+    await this.saveSessions(allSessions);
+    
+    return newSessions;
+  }
+
+  /**
+   * Get all unique symbols from sessions
+   */
+  async getUniqueSymbols(): Promise<string[]> {
+    await this.ensureTable();
+    
+    const sessions = await this.loadSessions();
+    const symbols = new Set(sessions.map(s => s.symbol));
+    return Array.from(symbols);
+  }
+
+  /**
+   * Get session count by symbol
+   */
+  async getSessionCountBySymbol(): Promise<Map<string, number>> {
+    await this.ensureTable();
+    
+    const sessions = await this.loadSessions();
+    const countMap = new Map<string, number>();
+    
+    for (const session of sessions) {
+      const count = countMap.get(session.symbol) || 0;
+      countMap.set(session.symbol, count + 1);
+    }
+    
+    return countMap;
+  }
+
+  /**
+   * Delete old sessions (older than specified date)
+   */
+  async deleteOldSessions(olderThan: Date): Promise<number> {
+    await this.ensureTable();
+    
+    const sessions = await this.loadSessions();
+    const initialCount = sessions.length;
+    const filteredSessions = sessions.filter(s => s.created_at >= olderThan);
+    
+    const deletedCount = initialCount - filteredSessions.length;
+    await this.saveSessions(filteredSessions);
+    
+    return deletedCount;
+  }
+
+  /**
+   * Export all sessions to a backup file
+   */
+  async exportToBackup(backupPath?: string): Promise<string> {
+    await this.ensureTable();
+    
+    const sessions = await this.loadSessions();
+    const backupFilePath = backupPath || path.join(this.dataDir, `sessions_backup_${Date.now()}.json`);
+    
+    const sessionsData: SessionData[] = sessions.map(session => ({
+      ...session,
+      created_at: session.created_at.toISOString(),
+      updated_at: session.updated_at.toISOString()
     }));
     
-    const { data: createdSessions, error } = await this.supabase
-      .from(this.TABLE_NAME)
-      .insert(sessionsWithTimestamps)
-      .select();
+    await fs.writeFile(backupFilePath, JSON.stringify(sessionsData, null, 2), 'utf-8');
+    console.log(`Sessions exported to ${backupFilePath}`);
     
-    if (error) throw new Error(`Batch create sessions failed: ${error.message}`);
-    return createdSessions || [];
+    return backupFilePath;
+  }
+
+  /**
+   * Clear all sessions (use with caution)
+   */
+  async clearAllSessions(): Promise<void> {
+    await this.saveSessions([]);
+    console.log('All sessions cleared');
   }
 }

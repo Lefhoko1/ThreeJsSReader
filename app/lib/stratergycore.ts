@@ -237,7 +237,7 @@ export class StrategyCore {
       const records = await this.betRecordService.getRecords(pattern, { sessionid });
       for (const record of records) {
         // Check each bet level
-        const betLevels = ['first', 'second', 'third', 'fourth', 'fifth'];
+        const betLevels = ['first', 'second', 'third', 'fourth', 'fifth'] as const;
         for (const level of betLevels) {
           const result = record[`${level}betResult`];
           if (result === 'won') {
@@ -460,4 +460,77 @@ export class StrategyCore {
       }
     }
   }
-}
+
+  /**
+   * Get overall strategy performance across all sessions
+   *//**
+ * Get overall strategy performance across all sessions
+ */
+async getOverallPerformance(trend: 'uptrend' | 'downtrend'): Promise<{
+  totalSessions: number;
+  winningSessions: number;
+  losingSessions: number;
+  pendingSessions: number;
+  winRate: number;
+  totalBets: number;
+  totalProfit: number;
+  averageProfitPerSession: number;
+}> {
+  const patterns = trend === 'uptrend' ? Object.values(UptrendPatterns) : Object.values(DowntrendPatterns);
+  const sessionResults = new Map<string, string>();
+  
+  // Collect all session results
+  for (const pattern of patterns) {
+    const records = await this.betRecordService.getRecords(pattern, {});
+    for (const record of records) {
+      if (record.sessionresult && !sessionResults.has(record.sessionid)) {
+        sessionResults.set(record.sessionid, record.sessionresult);
+      }
+    }
+  }
+  
+  const sessions = Array.from(sessionResults.entries());
+  const totalSessions = sessions.length;
+  
+  if (totalSessions === 0) {
+    return {
+      totalSessions: 0,
+      winningSessions: 0,
+      losingSessions: 0,
+      pendingSessions: 0,
+      winRate: 0,
+      totalBets: 0,
+      totalProfit: 0,
+      averageProfitPerSession: 0
+    };
+  }
+  
+  const winningSessions = sessions.filter(([_, result]) => result === 'win').length;
+  const losingSessions = sessions.filter(([_, result]) => result === 'loss').length;
+  const pendingSessions = sessions.filter(([_, result]) => result === 'pending').length;
+  
+  // Calculate total profit/loss and total bets
+  let totalProfit = 0;
+  let totalBets = 0;
+  
+  for (const [sessionid] of sessions) {
+    try {
+      const stats = await this.getSessionStatistics(sessionid, trend);
+      totalProfit += stats.wonAmount - stats.lostAmount;
+      totalBets += stats.totalBets;
+    } catch (error) {
+      console.error(`Failed to get statistics for session ${sessionid}:`, error);
+    }
+  }
+  
+  return {
+    totalSessions,
+    winningSessions,
+    losingSessions,
+    pendingSessions,
+    winRate: (winningSessions / totalSessions) * 100,
+    totalBets,
+    totalProfit,
+    averageProfitPerSession: totalProfit / totalSessions
+  };
+}}

@@ -1,10 +1,12 @@
-import { createClient } from "@supabase/supabase-js";
 import { ALL_VOLATILITY_SYMBOLS } from '../constants/volatilitySymbols';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 // ─── Config ───────────────────────────────────────────────────────
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const GRANULARITY = 1800; // 30 minutes
+
+// Data directory for storing candle data
+const DATA_DIR = path.join(process.cwd(), 'data', 'candles');
 
 export interface MarketSelectionResult {
   symbol: string;
@@ -20,9 +22,19 @@ export interface MarketSelectionResult {
   volumeConfirmation: boolean;
 }
 
+export interface CandleData {
+  timestamp: Date;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+  epoch?: number;
+  datetime?: string;
+}
+
 export class MarketAnalysisIndicators {
   private symbols = [...ALL_VOLATILITY_SYMBOLS];
-  private supabase;
   
   // MT5 standard buffer sizes
   private readonly MAX_CANDLES = 500;
@@ -31,12 +43,59 @@ export class MarketAnalysisIndicators {
   private readonly MA_PERIOD_SLOW = 10;
   private readonly ATR_PERIOD = 14;
   private readonly MIN_CANDLES_FOR_ATR = 20;
+  private dataDir: string;
 
   constructor() {
-    if (!SUPABASE_URL || !SUPABASE_KEY) {
-      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+    this.dataDir = DATA_DIR;
+    this.ensureDataDirectory();
+  }
+
+  /**
+   * Ensure data directory exists
+   */
+  private async ensureDataDirectory(): Promise<void> {
+    try {
+      await fs.access(this.dataDir);
+    } catch {
+      await fs.mkdir(this.dataDir, { recursive: true });
     }
-    this.supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  }
+
+  /**
+   * Sanitize symbol name to be a valid filename
+   */
+  private sanitizeFilename(symbol: string): string {
+    let filename = `candle_${symbol.toLowerCase()}`;
+    filename = filename.replace(/[^a-z0-9_]/g, '_');
+    return filename;
+  }
+
+  /**
+   * Get file path for a symbol
+   */
+  private getFilePath(symbol: string): string {
+    return path.join(this.dataDir, `${this.sanitizeFilename(symbol)}.json`);
+  }
+
+  /**
+   * Load candles from JSON file for a symbol
+   */
+  private async loadCandles(symbol: string): Promise<CandleData[]> {
+    const filePath = this.getFilePath(symbol);
+    try {
+      const data = await fs.readFile(filePath, 'utf-8');
+      const parsed = JSON.parse(data);
+      // Convert string dates back to Date objects
+      return parsed.map((candle: any) => ({
+        ...candle,
+        timestamp: new Date(candle.timestamp)
+      }));
+    } catch (error: any) {
+      if (error.code === 'ENOENT') {
+        return [];
+      }
+      throw new Error(`Failed to load candles for "${symbol}": ${error.message}`);
+    }
   }
 
   async selectMarketForTrading(): Promise<MarketSelectionResult | null> {
@@ -179,7 +238,7 @@ export class MarketAnalysisIndicators {
   }
 
   // Calculate full SMA buffer like MT5 indicator (from oldest to newest)
-  private calculateSMABuffer(candles: Array<{ close: number }>, period: number): (number | null)[] {
+  private calculateSMABuffer(candles: CandleData[], period: number): (number | null)[] {
     const buffer: (number | null)[] = new Array(candles.length).fill(null);
     let sum = 0;
     
@@ -198,7 +257,7 @@ export class MarketAnalysisIndicators {
   }
 
   // Calculate ATR buffer like MT5
-  private calculateATRBuffer(candles: Array<{ high: number; low: number; close: number }>, period: number): (number | null)[] {
+  private calculateATRBuffer(candles: CandleData[], period: number): (number | null)[] {
     const trueRanges: number[] = [];
     const atrBuffer: (number | null)[] = new Array(candles.length).fill(null);
     
@@ -278,7 +337,7 @@ export class MarketAnalysisIndicators {
   }
 
   // Calculate single ATR value (fallback method)
-  private calculateATR(candles: Array<{ high: number; low: number; close: number }>, period: number): number {
+  private calculateATR(candles: CandleData[], period: number): number {
     if (candles.length < period + 1) return 0;
     
     let sum = 0;
@@ -295,40 +354,20 @@ export class MarketAnalysisIndicators {
     return sum / period;
   }
 
-  private async getRecentCandles(symbol: string, limit: number): Promise<Array<{
-    timestamp: Date;
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-    volume?: number;
-  }>> {
-    const tableName = symbol.toLowerCase();
+  private async getRecentCandles(symbol: string, limit: number): Promise<CandleData[]> {
+    const candles = await this.loadCandles(symbol);
     
-    // Fetch candles from Supabase
-    const { data: candles, error } = await this.supabase
-      .from(tableName)
-      .select('datetime, open, high, low, close')
-      .order('epoch', { ascending: true })  // ASC for proper buffer calculation
-      .limit(limit);
-    
-    if (error) {
-      throw new Error(`Failed to fetch candles for "${tableName}": ${error.message}`);
-    }
-    
-    if (!candles || candles.length === 0) {
+    if (candles.length === 0) {
       return [];
     }
     
-    // Map Supabase response to expected format
-    return candles.map(candle => ({
-      timestamp: new Date(candle.datetime),
-      open: parseFloat(candle.open),
-      high: parseFloat(candle.high),
-      low: parseFloat(candle.low),
-      close: parseFloat(candle.close),
-      volume: undefined // Volume not stored in your candle schema
-    }));
+    // Sort by timestamp (oldest first for proper buffer calculation)
+    const sortedCandles = candles.sort((a, b) => 
+      a.timestamp.getTime() - b.timestamp.getTime()
+    );
+    
+    // Return the most recent candles up to the limit
+    return sortedCandles.slice(-limit);
   }
 
   /**
@@ -453,5 +492,64 @@ export class MarketAnalysisIndicators {
       console.error(`Failed to get detailed analysis for ${symbol}:`, error);
       return null;
     }
+  }
+
+  /**
+   * Check if data exists for a symbol
+   */
+  async hasData(symbol: string): Promise<boolean> {
+    const candles = await this.loadCandles(symbol);
+    return candles.length > 0;
+  }
+
+  /**
+   * Get data statistics for a symbol
+   */
+  async getDataStatistics(symbol: string): Promise<{
+    totalCandles: number;
+    firstCandle: Date | null;
+    lastCandle: Date | null;
+    dateRange: string;
+  }> {
+    const candles = await this.loadCandles(symbol);
+    
+    if (candles.length === 0) {
+      return {
+        totalCandles: 0,
+        firstCandle: null,
+        lastCandle: null,
+        dateRange: 'No data'
+      };
+    }
+    
+    const sortedCandles = candles.sort((a, b) => 
+      a.timestamp.getTime() - b.timestamp.getTime()
+    );
+    
+    const firstCandle = sortedCandles[0].timestamp;
+    const lastCandle = sortedCandles[sortedCandles.length - 1].timestamp;
+    
+    return {
+      totalCandles: candles.length,
+      firstCandle,
+      lastCandle,
+      dateRange: `${firstCandle.toLocaleDateString()} - ${lastCandle.toLocaleDateString()}`
+    };
+  }
+
+  /**
+   * Refresh data for a specific symbol (load latest from files)
+   */
+  async refreshSymbolData(symbol: string): Promise<void> {
+    // This method is useful if you want to reload data
+    // The actual loading happens in getRecentCandles
+    console.log(`Data for ${symbol} will be refreshed on next analysis`);
+  }
+
+  /**
+   * Get all available symbols
+   */
+  getSymbols(): string[] {
+    return [...this.symbols];
   }
 }

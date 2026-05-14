@@ -10,12 +10,14 @@ export async function POST(request: NextRequest) {
 
     console.log('🕯️ Updating latest candles...');
     const service = new DerivDataCandleService();
-    await service.createTables(); // Ensure tables exist
-    await service.updateLatestCandles();
+    await service.createTables(); // Ensure JSON files exist
+    const result = await service.updateLatestCandles(); // Only fetch new candles
     
     return NextResponse.json({ 
       success: true, 
       message: 'Latest candles updated successfully',
+      totalAdded: result.totalAdded,
+      results: result.results,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
