@@ -12,6 +12,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
     "dotenv": "^17.4.2",
+    "mysql2": "^3.22.3",
     "next": "16.2.6",
     "pg": "^8.20.0",
     "pg-hstore": "^2.3.4",
