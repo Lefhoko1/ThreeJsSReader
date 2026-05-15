@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { StarBotTradingLogic } from '@/app/lib/tradinglogic';
-import { DerivDataCandleService } from '../../lib/services/DerivDataCandleService';
 
 // ============================================
 // TYPES FOR BINARY OPTIONS TRADING
@@ -18,8 +17,6 @@ interface DerivConfig {
 
 // Store trading bot instance
 let tradingBot: StarBotTradingLogic | null = null;
-let candleService: DerivDataCandleService | null = null;
-let isCandleServiceInitialized = false;
 
 // Hardcoded secret for authorization
 const EXPECTED_SECRET = 'a3f8c2e1b7d4e9f0c6a2b5d8e1f4a7c0b3d6e9f2a5b8c1d4e7f0a3b6c9d2e5';
@@ -57,16 +54,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             throw new Error('Missing Deriv API token');
         }
 
-        // 4. Initialize Candle Service if not already initialized
-        if (!candleService) {
-            console.log('🕯️ Initializing DerivDataCandleService...');
-            candleService = new DerivDataCandleService();
-            await candleService.initialize();
-            isCandleServiceInitialized = true;
-            console.log('✅ Candle service initialized successfully');
-        }
-
-        // 5. Initialize StarBot if not exists
+        // 4. Initialize StarBot only if not exists (no candle service)
         if (!tradingBot) {
             console.log('🤖 Initializing StarBot...');
             tradingBot = new StarBotTradingLogic({
@@ -75,12 +63,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                 wsUrl: process.env.DERIV_WS_URL || 'wss://ws.binaryws.com/websockets/v3'
             });
 
-            // Initialize bot on first run
+            // Initialize bot (assumes tables and candles already exist)
             await tradingBot.initializeBot();
             console.log('✅ StarBot initialized successfully');
         }
 
-        // 6. Process trading cycle
+        // 5. Process trading cycle only
         console.log('🔄 Processing trading cycle...');
         await tradingBot.processTradingCycle();
 
@@ -92,10 +80,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         return NextResponse.json({
             success: true,
             message: 'Trading cycle processed successfully',
-            candleServiceStatus: {
-                isInitialized: isCandleServiceInitialized,
-                symbolsTracked: candleService ? 'active' : 'inactive'
-            },
             botState: {
                 isInitialized: botState.isInitialized,
                 isWaitingForSignal: botState.isWaitingForSignal,
@@ -110,7 +94,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     } catch (error: any) {
         console.error('❌ Trading cycle error:', error);
         
-        // Ensure we always return valid JSON
         return NextResponse.json({
             success: false,
             error: error.message || 'Internal server error',
@@ -120,15 +103,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 }
 
-// Optional: Add a cleanup endpoint for graceful shutdown
+// Cleanup endpoint for graceful shutdown
 export async function DELETE(): Promise<NextResponse> {
     try {
-        if (candleService) {
-            await candleService.closeConnection();
-            candleService = null;
-            isCandleServiceInitialized = false;
-        }
-        
         if (tradingBot) {
             await tradingBot.closeConnections();
             tradingBot = null;
@@ -136,7 +113,7 @@ export async function DELETE(): Promise<NextResponse> {
         
         return NextResponse.json({
             success: true,
-            message: 'Services cleaned up successfully',
+            message: 'Trading bot cleaned up successfully',
             timestamp: new Date().toISOString()
         });
     } catch (error: any) {
@@ -148,29 +125,17 @@ export async function DELETE(): Promise<NextResponse> {
     }
 }
 
+// GET endpoint for bot status
 export async function GET(): Promise<NextResponse> {
     try {
-        const status = {
-            candleService: {
-                isInitialized: isCandleServiceInitialized,
-                isActive: candleService !== null
-            },
-            tradingBot: tradingBot ? {
-                isInitialized: tradingBot.getBotState().isInitialized,
-                isWaitingForSignal: tradingBot.getBotState().isWaitingForSignal,
-                activeSessionId: tradingBot.getBotState().activeSessionId
-            } : null
-        };
-        
         if (!tradingBot) {
             return NextResponse.json({
                 status: 'ready',
-                message: 'StarBot trading logic and candle service are ready to initialize',
-                ...status,
+                message: 'StarBot trading logic is ready to initialize',
                 config: {
                     derivAppId: process.env.DERIV_APP_ID || '1089',
                     derivWsUrl: process.env.DERIV_WS_URL || 'wss://ws.binaryws.com/websockets/v3',
-                    cronSecretRequired: 'Hardcoded - no env var needed'
+                    note: 'Assumes candle data is already loaded via /api/init-candles and /api/update-candles'
                 },
                 timestamp: new Date().toISOString()
             });
@@ -182,7 +147,6 @@ export async function GET(): Promise<NextResponse> {
         return NextResponse.json({
             status: 'running',
             message: 'StarBot trading logic is active',
-            ...status,
             botState: {
                 isInitialized: botState.isInitialized,
                 isWaitingForSignal: botState.isWaitingForSignal,
