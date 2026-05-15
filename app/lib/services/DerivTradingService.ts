@@ -1,6 +1,17 @@
 import WebSocket from 'ws';
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import mysql from 'mysql2/promise';
+
+// ─── Database Config ───────────────────────────────────────────────────────
+const DB_CONFIG = {
+  host: 'sql5.freesqldatabase.com',
+  user: 'sql5826978',
+  password: 'Cd5wHyRQbs',
+  database: 'sql5826978',
+  port: 3306,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+};
 
 export interface DerivConfig {
   appId: number;
@@ -53,196 +64,219 @@ export interface TradeRecord {
   updated_at: string;
 }
 
-// Data directory for storing trade history
-const DATA_DIR = path.join(process.cwd(), 'data', 'trades');
-
 export class DerivTradingService {
   private ws: WebSocket | null = null;
   private config: DerivConfig;
   private messageId: number = 1;
   private pendingRequests: Map<number, { resolve: Function; reject: Function }> = new Map();
   private isConnected: boolean = false;
-  private dataDir: string;
+  private pool: mysql.Pool;
 
   constructor(config: DerivConfig) {
     this.config = config;
-    this.dataDir = DATA_DIR;
-    this.ensureDataDirectory();
+    this.pool = mysql.createPool(DB_CONFIG);
   }
 
   /**
-   * Ensure data directory exists
+   * Create tables if they don't exist
    */
-  private async ensureDataDirectory(): Promise<void> {
-    try {
-      await fs.access(this.dataDir);
-    } catch {
-      await fs.mkdir(this.dataDir, { recursive: true });
-    }
-  }
-
-  /**
-   * Get file path for trade history
-   */
-  private getTradeHistoryPath(): string {
-    return path.join(this.dataDir, 'trade_history.json');
-  }
-
-  /**
-   * Get file path for transaction log
-   */
-  private getTransactionLogPath(): string {
-    return path.join(this.dataDir, 'transaction_log.json');
-  }
-
-  /**
-   * Load trades from JSON file
-   */
-  private async loadTrades(): Promise<TradeRecord[]> {
-    const filePath = this.getTradeHistoryPath();
-    try {
-      const data = await fs.readFile(filePath, 'utf-8');
-      return JSON.parse(data);
-    } catch (error: any) {
-      if (error.code === 'ENOENT') {
-        return [];
-      }
-      throw new Error(`Failed to load trades: ${error.message}`);
-    }
-  }
-
-  /**
-   * Save trades to JSON file
-   */
-  private async saveTrades(trades: TradeRecord[]): Promise<void> {
-    const filePath = this.getTradeHistoryPath();
-    await fs.writeFile(filePath, JSON.stringify(trades, null, 2), 'utf-8');
-  }
-
-  /**
-   * Load transaction log
-   */
-  private async loadTransactionLog(): Promise<any[]> {
-    const filePath = this.getTransactionLogPath();
-    try {
-      const data = await fs.readFile(filePath, 'utf-8');
-      return JSON.parse(data);
-    } catch (error: any) {
-      if (error.code === 'ENOENT') {
-        return [];
-      }
-      throw new Error(`Failed to load transaction log: ${error.message}`);
-    }
-  }
-
-  /**
-   * Save transaction log
-   */
-  private async saveTransactionLog(logs: any[]): Promise<void> {
-    const filePath = this.getTransactionLogPath();
-    await fs.writeFile(filePath, JSON.stringify(logs, null, 2), 'utf-8');
+  private async createTables(): Promise<void> {
+    // Create trades table
+    const createTradesTableSQL = `
+      CREATE TABLE IF NOT EXISTS trade_history (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        contract_id VARCHAR(255) NOT NULL UNIQUE,
+        symbol VARCHAR(50) NOT NULL,
+        contract_type ENUM('CALL', 'PUT') NOT NULL,
+        amount DECIMAL(20, 8) NOT NULL,
+        duration INT NOT NULL,
+        duration_unit ENUM('t', 's', 'm', 'h') NOT NULL,
+        buy_price DECIMAL(20, 8) NOT NULL,
+        sell_price DECIMAL(20, 8),
+        payout DECIMAL(20, 8),
+        profit DECIMAL(20, 8),
+        start_time DATETIME NOT NULL,
+        expiry_time DATETIME,
+        status ENUM('open', 'closed', 'expired', 'cancelled') DEFAULT 'open',
+        balance_before DECIMAL(20, 8),
+        balance_after DECIMAL(20, 8),
+        created_at DATETIME NOT NULL,
+        updated_at DATETIME NOT NULL,
+        INDEX idx_contract_id (contract_id),
+        INDEX idx_symbol (symbol),
+        INDEX idx_status (status),
+        INDEX idx_created_at (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `;
+    
+    await this.pool.execute(createTradesTableSQL);
+    
+    // Create transaction log table
+    const createLogTableSQL = `
+      CREATE TABLE IF NOT EXISTS transaction_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        type VARCHAR(50) NOT NULL,
+        trade_id INT,
+        contract_id VARCHAR(255),
+        details JSON,
+        timestamp DATETIME NOT NULL,
+        INDEX idx_type (type),
+        INDEX idx_trade_id (trade_id),
+        INDEX idx_timestamp (timestamp)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `;
+    
+    await this.pool.execute(createLogTableSQL);
+    
+    console.log('✅ Trade tables created or already exist');
   }
 
   /**
    * Get next trade ID
    */
   private async getNextTradeId(): Promise<number> {
-    const trades = await this.loadTrades();
-    if (trades.length === 0) return 1;
-    return Math.max(...trades.map(t => t.id)) + 1;
+    const [rows] = await this.pool.execute('SELECT MAX(id) as max_id FROM trade_history');
+    const maxId = (rows as any[])[0]?.max_id || 0;
+    return maxId + 1;
   }
 
   /**
    * Log a transaction
    */
   private async logTransaction(transaction: any): Promise<void> {
-    const logs = await this.loadTransactionLog();
-    logs.push({
-      ...transaction,
-      id: logs.length + 1,
-      timestamp: new Date().toISOString()
-    });
-    await this.saveTransactionLog(logs);
+    const insertSQL = `
+      INSERT INTO transaction_log (type, trade_id, contract_id, details, timestamp)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+    
+    await this.pool.execute(insertSQL, [
+      transaction.type,
+      transaction.trade_id || null,
+      transaction.contract_id || null,
+      JSON.stringify(transaction),
+      transaction.timestamp || new Date().toISOString()
+    ]);
   }
 
   /**
    * Save a trade record
    */
   private async saveTradeRecord(trade: Partial<TradeRecord>): Promise<TradeRecord> {
-    const trades = await this.loadTrades();
     const now = new Date().toISOString();
+    const newId = await this.getNextTradeId();
     
-    const newTrade: TradeRecord = {
-      id: await this.getNextTradeId(),
-      contract_id: trade.contract_id || '',
-      symbol: trade.symbol || '',
-      contract_type: trade.contract_type || 'CALL',
-      amount: trade.amount || 0,
-      duration: trade.duration || 0,
-      duration_unit: trade.duration_unit || 't',
-      buy_price: trade.buy_price || 0,
-      sell_price: trade.sell_price,
-      payout: trade.payout,
-      profit: trade.profit,
-      start_time: trade.start_time || now,
-      expiry_time: trade.expiry_time,
-      status: trade.status || 'open',
-      balance_before: trade.balance_before,
-      balance_after: trade.balance_after,
-      created_at: now,
-      updated_at: now
-    };
+    const insertSQL = `
+      INSERT INTO trade_history (
+        id, contract_id, symbol, contract_type, amount, duration, duration_unit,
+        buy_price, sell_price, payout, profit, start_time, expiry_time, status,
+        balance_before, balance_after, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
     
-    trades.push(newTrade);
-    await this.saveTrades(trades);
+    await this.pool.execute(insertSQL, [
+      newId,
+      trade.contract_id || '',
+      trade.symbol || '',
+      trade.contract_type || 'CALL',
+      trade.amount || 0,
+      trade.duration || 0,
+      trade.duration_unit || 't',
+      trade.buy_price || 0,
+      trade.sell_price || null,
+      trade.payout || null,
+      trade.profit || null,
+      trade.start_time || now,
+      trade.expiry_time || null,
+      trade.status || 'open',
+      trade.balance_before || null,
+      trade.balance_after || null,
+      now,
+      now
+    ]);
     
     // Log the transaction
     await this.logTransaction({
       type: 'trade_created',
-      trade_id: newTrade.id,
-      contract_id: newTrade.contract_id,
-      symbol: newTrade.symbol,
-      amount: newTrade.amount,
-      contract_type: newTrade.contract_type
+      trade_id: newId,
+      contract_id: trade.contract_id,
+      symbol: trade.symbol,
+      amount: trade.amount,
+      contract_type: trade.contract_type,
+      timestamp: now
     });
     
-    return newTrade;
+    // Return the created record
+    return this.getTradeByContractId(trade.contract_id || '') as Promise<TradeRecord>;
   }
 
   /**
    * Update a trade record
    */
   private async updateTradeRecord(contractId: string, updates: Partial<TradeRecord>): Promise<TradeRecord | null> {
-    const trades = await this.loadTrades();
-    const index = trades.findIndex(t => t.contract_id === contractId);
+    // First get the existing record
+    const existing = await this.getTradeByContractId(contractId);
+    if (!existing) return null;
     
-    if (index === -1) return null;
+    const updateFields: string[] = [];
+    const values: any[] = [];
     
-    trades[index] = {
-      ...trades[index],
-      ...updates,
-      updated_at: new Date().toISOString()
-    };
+    if (updates.sell_price !== undefined) {
+      updateFields.push('sell_price = ?');
+      values.push(updates.sell_price);
+    }
+    if (updates.payout !== undefined) {
+      updateFields.push('payout = ?');
+      values.push(updates.payout);
+    }
+    if (updates.profit !== undefined) {
+      updateFields.push('profit = ?');
+      values.push(updates.profit);
+    }
+    if (updates.expiry_time !== undefined) {
+      updateFields.push('expiry_time = ?');
+      values.push(updates.expiry_time);
+    }
+    if (updates.status !== undefined) {
+      updateFields.push('status = ?');
+      values.push(updates.status);
+    }
+    if (updates.balance_after !== undefined) {
+      updateFields.push('balance_after = ?');
+      values.push(updates.balance_after);
+    }
     
-    await this.saveTrades(trades);
+    if (updateFields.length === 0) return existing;
+    
+    updateFields.push('updated_at = ?');
+    values.push(new Date().toISOString());
+    values.push(contractId);
+    
+    const updateSQL = `UPDATE trade_history SET ${updateFields.join(', ')} WHERE contract_id = ?`;
+    await this.pool.execute(updateSQL, values);
     
     // Log the update
     await this.logTransaction({
       type: 'trade_updated',
-      trade_id: trades[index].id,
+      trade_id: existing.id,
       contract_id: contractId,
-      updates: Object.keys(updates)
+      updates: Object.keys(updates),
+      timestamp: new Date().toISOString()
     });
     
-    return trades[index];
+    return this.getTradeByContractId(contractId);
   }
 
   /**
    * Get trade by contract ID
    */
   async getTradeByContractId(contractId: string): Promise<TradeRecord | null> {
-    const trades = await this.loadTrades();
-    return trades.find(t => t.contract_id === contractId) || null;
+    const [rows] = await this.pool.execute(
+      'SELECT * FROM trade_history WHERE contract_id = ?',
+      [contractId]
+    );
+    
+    const trades = rows as TradeRecord[];
+    return trades.length > 0 ? trades[0] : null;
   }
 
   /**
@@ -256,34 +290,40 @@ export class DerivTradingService {
     limit?: number;
     offset?: number;
   }): Promise<TradeRecord[]> {
-    let trades = await this.loadTrades();
+    let query = 'SELECT * FROM trade_history WHERE 1=1';
+    const params: any[] = [];
     
-    // Apply filters
     if (options?.symbol) {
-      trades = trades.filter(t => t.symbol === options.symbol);
+      query += ' AND symbol = ?';
+      params.push(options.symbol);
     }
     if (options?.status) {
-      trades = trades.filter(t => t.status === options.status);
+      query += ' AND status = ?';
+      params.push(options.status);
     }
     if (options?.startDate) {
-      trades = trades.filter(t => new Date(t.created_at) >= options.startDate!);
+      query += ' AND created_at >= ?';
+      params.push(options.startDate);
     }
     if (options?.endDate) {
-      trades = trades.filter(t => new Date(t.created_at) <= options.endDate!);
+      query += ' AND created_at <= ?';
+      params.push(options.endDate);
     }
     
-    // Sort by creation date (newest first)
-    trades.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    query += ' ORDER BY created_at DESC';
     
-    // Apply pagination
-    if (options?.offset !== undefined) {
-      const limit = options?.limit || 50;
-      trades = trades.slice(options.offset, options.offset + limit);
-    } else if (options?.limit) {
-      trades = trades.slice(0, options.limit);
+    if (options?.limit) {
+      query += ' LIMIT ?';
+      params.push(options.limit);
+      
+      if (options?.offset) {
+        query += ' OFFSET ?';
+        params.push(options.offset);
+      }
     }
     
-    return trades;
+    const [rows] = await this.pool.execute(query, params);
+    return rows as TradeRecord[];
   }
 
   /**
@@ -299,11 +339,16 @@ export class DerivTradingService {
     bestTrade: number;
     worstTrade: number;
   }> {
-    let trades = await this.loadTrades();
+    let query = 'SELECT * FROM trade_history WHERE status = "closed"';
+    const params: any[] = [];
     
     if (symbol) {
-      trades = trades.filter(t => t.symbol === symbol);
+      query += ' AND symbol = ?';
+      params.push(symbol);
     }
+    
+    const [rows] = await this.pool.execute(query, params);
+    const trades = rows as TradeRecord[];
     
     const closedTrades = trades.filter(t => t.status === 'closed' && t.profit !== undefined);
     const winningTrades = closedTrades.filter(t => (t.profit || 0) > 0);
@@ -311,8 +356,19 @@ export class DerivTradingService {
     const totalProfit = closedTrades.reduce((sum, t) => sum + (t.profit || 0), 0);
     const profits = closedTrades.map(t => t.profit || 0);
     
+    // Get total count including open trades
+    let countQuery = 'SELECT COUNT(*) as total FROM trade_history';
+    const countParams: any[] = [];
+    if (symbol) {
+      countQuery += ' WHERE symbol = ?';
+      countParams.push(symbol);
+    }
+    
+    const [countResult] = await this.pool.execute(countQuery, countParams);
+    const totalTrades = (countResult as any[])[0].total;
+    
     return {
-      totalTrades: trades.length,
+      totalTrades: totalTrades,
       winningTrades: winningTrades.length,
       losingTrades: losingTrades.length,
       totalProfit: totalProfit,
@@ -327,15 +383,26 @@ export class DerivTradingService {
    * Clear all trade history (use with caution)
    */
   async clearTradeHistory(): Promise<void> {
-    await this.saveTrades([]);
-    await this.saveTransactionLog([]);
+    await this.pool.execute('DELETE FROM trade_history');
+    await this.pool.execute('DELETE FROM transaction_log');
     console.log('Trade history cleared');
+  }
+
+  /**
+   * Initialize database tables
+   */
+  async initialize(): Promise<void> {
+    await this.createTables();
+    console.log('Database tables initialized');
   }
 
   async connect(): Promise<void> {
     if (this.isConnected) {
       return; // Already connected
     }
+
+    // Ensure tables exist
+    await this.createTables();
 
     return new Promise((resolve, reject) => {
       const url = `${this.config.wsUrl}?app_id=${this.config.appId}`;
@@ -576,5 +643,13 @@ export class DerivTradingService {
 
   isConnectedToDeriv(): boolean {
     return this.isConnected;
+  }
+
+  /**
+   * Close database connection pool
+   */
+  async closeConnection(): Promise<void> {
+    await this.pool.end();
+    console.log('Database connection closed');
   }
 }

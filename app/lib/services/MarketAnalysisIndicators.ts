@@ -1,12 +1,20 @@
 import { ALL_VOLATILITY_SYMBOLS } from '../constants/volatilitySymbols';
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import mysql from 'mysql2/promise';
+
+// ─── Database Config ───────────────────────────────────────────────────────
+const DB_CONFIG = {
+  host: 'sql5.freesqldatabase.com',
+  user: 'sql5826978',
+  password: 'Cd5wHyRQbs',
+  database: 'sql5826978',
+  port: 3306,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+};
 
 // ─── Config ───────────────────────────────────────────────────────
 const GRANULARITY = 1800; // 30 minutes
-
-// Data directory for storing candle data
-const DATA_DIR = path.join(process.cwd(), 'data', 'candles');
 
 export interface MarketSelectionResult {
   symbol: string;
@@ -35,6 +43,7 @@ export interface CandleData {
 
 export class MarketAnalysisIndicators {
   private symbols = [...ALL_VOLATILITY_SYMBOLS];
+  private pool: mysql.Pool;
   
   // MT5 standard buffer sizes
   private readonly MAX_CANDLES = 500;
@@ -43,59 +52,105 @@ export class MarketAnalysisIndicators {
   private readonly MA_PERIOD_SLOW = 10;
   private readonly ATR_PERIOD = 14;
   private readonly MIN_CANDLES_FOR_ATR = 20;
-  private dataDir: string;
 
   constructor() {
-    this.dataDir = DATA_DIR;
-    this.ensureDataDirectory();
+    this.pool = mysql.createPool(DB_CONFIG);
   }
 
   /**
-   * Ensure data directory exists
+   * Get table name for a symbol
    */
-  private async ensureDataDirectory(): Promise<void> {
-    try {
-      await fs.access(this.dataDir);
-    } catch {
-      await fs.mkdir(this.dataDir, { recursive: true });
+  private getTableName(symbol: string): string {
+    let tableName = `candle_${symbol.toLowerCase()}`;
+    tableName = tableName.replace(/[^a-z0-9_]/g, '_');
+    return tableName;
+  }
+
+  /**
+   * Create table for a specific symbol
+   */
+  private async createTableForSymbol(symbol: string): Promise<void> {
+    const tableName = this.getTableName(symbol);
+    
+    const createTableSQL = `
+      CREATE TABLE IF NOT EXISTS ${tableName} (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        timestamp DATETIME NOT NULL,
+        open DECIMAL(20, 8) NOT NULL,
+        high DECIMAL(20, 8) NOT NULL,
+        low DECIMAL(20, 8) NOT NULL,
+        close DECIMAL(20, 8) NOT NULL,
+        volume DECIMAL(20, 8),
+        epoch BIGINT,
+        datetime VARCHAR(50),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_timestamp (timestamp),
+        INDEX idx_timestamp (timestamp)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `;
+    
+    await this.pool.execute(createTableSQL);
+  }
+
+  /**
+   * Create tables for all symbols
+   */
+  async createTables(): Promise<void> {
+    for (const symbol of this.symbols) {
+      await this.createTableForSymbol(symbol);
     }
+    console.log('All candle tables created or verified.');
   }
 
   /**
-   * Sanitize symbol name to be a valid filename
-   */
-  private sanitizeFilename(symbol: string): string {
-    let filename = `candle_${symbol.toLowerCase()}`;
-    filename = filename.replace(/[^a-z0-9_]/g, '_');
-    return filename;
-  }
-
-  /**
-   * Get file path for a symbol
-   */
-  private getFilePath(symbol: string): string {
-    return path.join(this.dataDir, `${this.sanitizeFilename(symbol)}.json`);
-  }
-
-  /**
-   * Load candles from JSON file for a symbol
+   * Load candles from database for a symbol
    */
   private async loadCandles(symbol: string): Promise<CandleData[]> {
-    const filePath = this.getFilePath(symbol);
+    const tableName = this.getTableName(symbol);
+    
     try {
-      const data = await fs.readFile(filePath, 'utf-8');
-      const parsed = JSON.parse(data);
-      // Convert string dates back to Date objects
-      return parsed.map((candle: any) => ({
-        ...candle,
-        timestamp: new Date(candle.timestamp)
+      const [rows] = await this.pool.execute(
+        `SELECT timestamp, open, high, low, close, volume, epoch, datetime 
+         FROM ${tableName} 
+         ORDER BY timestamp ASC`
+      );
+      
+      const candles = rows as any[];
+      return candles.map(candle => ({
+        timestamp: new Date(candle.timestamp),
+        open: parseFloat(candle.open),
+        high: parseFloat(candle.high),
+        low: parseFloat(candle.low),
+        close: parseFloat(candle.close),
+        volume: candle.volume ? parseFloat(candle.volume) : undefined,
+        epoch: candle.epoch,
+        datetime: candle.datetime
       }));
     } catch (error: any) {
-      if (error.code === 'ENOENT') {
+      if (error.code === 'ER_NO_SUCH_TABLE') {
         return [];
       }
       throw new Error(`Failed to load candles for "${symbol}": ${error.message}`);
     }
+  }
+
+  /**
+   * Get recent candles for a symbol
+   */
+  private async getRecentCandles(symbol: string, limit: number): Promise<CandleData[]> {
+    const candles = await this.loadCandles(symbol);
+    
+    if (candles.length === 0) {
+      return [];
+    }
+    
+    // Sort by timestamp (oldest first for proper buffer calculation)
+    const sortedCandles = candles.sort((a, b) => 
+      a.timestamp.getTime() - b.timestamp.getTime()
+    );
+    
+    // Return the most recent candles up to the limit
+    return sortedCandles.slice(-limit);
   }
 
   async selectMarketForTrading(): Promise<MarketSelectionResult | null> {
@@ -354,22 +409,6 @@ export class MarketAnalysisIndicators {
     return sum / period;
   }
 
-  private async getRecentCandles(symbol: string, limit: number): Promise<CandleData[]> {
-    const candles = await this.loadCandles(symbol);
-    
-    if (candles.length === 0) {
-      return [];
-    }
-    
-    // Sort by timestamp (oldest first for proper buffer calculation)
-    const sortedCandles = candles.sort((a, b) => 
-      a.timestamp.getTime() - b.timestamp.getTime()
-    );
-    
-    // Return the most recent candles up to the limit
-    return sortedCandles.slice(-limit);
-  }
-
   /**
    * Get all symbols with their current trend status
    */
@@ -538,7 +577,7 @@ export class MarketAnalysisIndicators {
   }
 
   /**
-   * Refresh data for a specific symbol (load latest from files)
+   * Refresh data for a specific symbol (load latest from database)
    */
   async refreshSymbolData(symbol: string): Promise<void> {
     // This method is useful if you want to reload data
@@ -551,5 +590,21 @@ export class MarketAnalysisIndicators {
    */
   getSymbols(): string[] {
     return [...this.symbols];
+  }
+
+  /**
+   * Initialize database tables for all symbols
+   */
+  async initialize(): Promise<void> {
+    await this.createTables();
+    console.log('Market analysis tables initialized');
+  }
+
+  /**
+   * Close database connection pool
+   */
+  async closeConnection(): Promise<void> {
+    await this.pool.end();
+    console.log('Database connection closed');
   }
 }

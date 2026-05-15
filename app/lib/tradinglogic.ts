@@ -77,9 +77,11 @@ export class StarBotTradingLogic {
     console.log('🤖 StarBot initializing...');
 
     try {
-      // Ensure all JSON files exist
-      await this.betRecordService.createTables();
-      await this.sessionService.createTable();
+      // Initialize all database tables
+      await this.betRecordService.initialize();
+      await this.sessionService.initialize();
+      await this.derivCandleService.initialize();
+      await this.marketAnalysis.initialize();
 
       // Connect to Deriv trading service
       await this.derivTradingService.connect();
@@ -154,9 +156,9 @@ export class StarBotTradingLogic {
 
   /**
    * Session Creation Phase
-   * - Creates new session in JSON storage
+   * - Creates new session in database
    * - Session lasts 150 minutes (5 × 30-minute candles)
-   * - Seeds JSON files with first bet data
+   * - Seeds database tables with first bet data
    */
   private async createAndSeedSession(marketSelection: MarketSelectionResult): Promise<void> {
     console.log(`🔧 Creating session for ${marketSelection.symbol}...`);
@@ -184,7 +186,7 @@ export class StarBotTradingLogic {
       console.log(`✅ Session created: ${sessionId}, Duration: 150 minutes`);
       console.log(`🔎 Trading symbol selected from market analysis: ${this.sessionSymbol}`);
 
-      // Seed JSON files with pattern tables based on trend
+      // Seed database tables with pattern tables based on trend
       await this.seedSessionData(sessionId, trend);
 
       // Execute first bet
@@ -200,12 +202,12 @@ export class StarBotTradingLogic {
   }
 
   /**
-   * Seed the JSON files with data for all tables favoring the determined trend
+   * Seed the database tables with data for all tables favoring the determined trend
    * - For uptrend: seed all 16 uptrend pattern tables
    * - For downtrend: seed all 16 downtrend pattern tables
    */
   private async seedSessionData(sessionId: string, trend: 'uptrend' | 'downtrend'): Promise<void> {
-    console.log(`🌱 Seeding JSON files for ${trend}...`);
+    console.log(`🌱 Seeding database tables for ${trend}...`);
 
     const patternsToSeed = (trend === 'uptrend'
       ? Object.values(UptrendPatterns)
@@ -248,7 +250,7 @@ export class StarBotTradingLogic {
       });
     }
 
-    console.log(`✅ Seeded ${patternsToSeed.length} pattern JSON files`);
+    console.log(`✅ Seeded ${patternsToSeed.length} pattern database tables`);
   }
 
   /**
@@ -273,7 +275,7 @@ export class StarBotTradingLogic {
       // Get current session data
       const session = await this.sessionService.getSessionById(this.botState.activeSessionId!);
       if (!session) {
-        console.error('❌ Session not found in JSON storage');
+        console.error('❌ Session not found in database');
         this.resetSession();
         return;
       }
@@ -306,7 +308,7 @@ export class StarBotTradingLogic {
    * Execute a bet at the specified level (1-5)
    * - Calculates bet amount and direction
    * - Places trade with 30-minute expiry
-   * - Records bet in JSON storage
+   * - Records bet in database
    */
   private async executeBet(sessionId: string, trend: 'uptrend' | 'downtrend', betLevel: number): Promise<void> {
     console.log(`💰 Executing bet ${betLevel} for session ${sessionId}...`);
@@ -367,7 +369,7 @@ export class StarBotTradingLogic {
             symbol: this.sessionSymbol!,
           });
 
-          // Record bet in appropriate pattern JSON file
+          // Record bet in appropriate pattern database table
           tableInfo.betLevel = betLevel;
           
           // Update the bet record with the placed bet amount
@@ -387,7 +389,7 @@ export class StarBotTradingLogic {
   }
 
   /**
-   * Update bet record amount in JSON storage
+   * Update bet record amount in database
    */
   private async updateBetRecordAmount(sessionId: string, pattern: CandlePattern, betLevel: number, amount: number): Promise<void> {
     const records = await this.betRecordService.getRecords(pattern, { sessionid: sessionId });
@@ -492,7 +494,7 @@ export class StarBotTradingLogic {
             tableInfo.trend
           );
 
-          // Update JSON record
+          // Update database record
           await this.updateBetRecordResult(
             this.botState.activeSessionId!,
             pattern,
@@ -563,7 +565,7 @@ export class StarBotTradingLogic {
   }
 
   /**
-   * Update a specific bet record result in JSON storage
+   * Update a specific bet record result in database
    */
   private async updateBetRecordResult(
     sessionId: string,
@@ -581,31 +583,31 @@ export class StarBotTradingLogic {
         case 1:
           await this.betRecordService.updateRecord(pattern, record.id, {
             firstbetResult: result.result,
-            firstbetactual: result.candleData.close,
+            firstbetactual: result.result === 'won' ? 'green' : 'red',
           });
           break;
         case 2:
           await this.betRecordService.updateRecord(pattern, record.id, {
             secondbetResult: result.result,
-            secondbetactual: result.candleData.close,
+            secondbetactual: result.result === 'won' ? 'green' : 'red',
           });
           break;
         case 3:
           await this.betRecordService.updateRecord(pattern, record.id, {
             thirdbetResult: result.result,
-            thirdbetactual: result.candleData.close,
+            thirdbetactual: result.result === 'won' ? 'green' : 'red',
           });
           break;
         case 4:
           await this.betRecordService.updateRecord(pattern, record.id, {
             fourthbetResult: result.result,
-            fourthbetactual: result.candleData.close,
+            fourthbetactual: result.result === 'won' ? 'green' : 'red',
           });
           break;
         case 5:
           await this.betRecordService.updateRecord(pattern, record.id, {
             fifthbetResult: result.result,
-            fifthbetactual: result.candleData.close,
+            fifthbetactual: result.result === 'won' ? 'green' : 'red',
           });
           break;
       }
@@ -742,6 +744,18 @@ export class StarBotTradingLogic {
       pattern: pattern as CandlePattern,
       info,
     }));
+  }
+
+  /**
+   * Close all database connections
+   */
+  async closeConnections(): Promise<void> {
+    await this.betRecordService.closeConnection();
+    await this.sessionService.closeConnection();
+    await this.derivCandleService.closeConnection();
+    await this.marketAnalysis.closeConnection();
+    await this.derivTradingService.disconnect();
+    console.log('StarBot connections closed');
   }
 }
 

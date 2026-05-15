@@ -1,15 +1,23 @@
 import WebSocket from 'ws';
 import { ALL_VOLATILITY_SYMBOLS } from '../constants/volatilitySymbols';
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import mysql from 'mysql2/promise';
+
+// ─── Database Config ───────────────────────────────────────────────────────
+const DB_CONFIG = {
+  host: 'sql5.freesqldatabase.com',
+  user: 'sql5826978',
+  password: 'Cd5wHyRQbs',
+  database: 'sql5826978',
+  port: 3306,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+};
 
 // ─── Config ───────────────────────────────────────────────────────
 const DERIV_APP_ID = process.env.DERIV_APP_ID ? parseInt(process.env.DERIV_APP_ID, 10) : 1089;
 const WS_URL = `wss://ws.binaryws.com/websockets/v3?app_id=${DERIV_APP_ID}`;
 const GRANULARITY = 1800; // 30 minutes
-
-// Data directory for storing candles
-const DATA_DIR = path.join(process.cwd(), 'data', 'candles');
 
 // Candle interface
 interface Candle {
@@ -26,57 +34,32 @@ interface Candle {
 // Symbol configuration matching working script
 interface SymbolConfig {
   name: string;
-  file: string;
+  table: string;
   display: string;
 }
 
 const SYMBOLS_CONFIG: SymbolConfig[] = [
-  { name: "R_10", file: "v10_30min_candles.json", display: "Volatility 10 Index" },
-  { name: "R_25", file: "v25_30min_candles.json", display: "Volatility 25 Index" },
-  { name: "R_50", file: "v50_30min_candles.json", display: "Volatility 50 Index" },
-  { name: "R_75", file: "v75_30min_candles.json", display: "Volatility 75 Index" },
-  { name: "R_100", file: "v100_30min_candles.json", display: "Volatility 100 Index" },
-  { name: "1HZ10V", file: "v10_1hz_30min_candles.json", display: "Volatility 10 Index (1s)" },
-  { name: "1HZ25V", file: "v25_1hz_30min_candles.json", display: "Volatility 25 Index (1s)" },
-  { name: "1HZ50V", file: "v50_1hz_30min_candles.json", display: "Volatility 50 Index (1s)" },
-  { name: "1HZ75V", file: "v75_1hz_30min_candles.json", display: "Volatility 75 Index (1s)" },
-  { name: "1HZ100V", file: "v100_1hz_30min_candles.json", display: "Volatility 100 Index (1s)" }
+  { name: "R_10", table: "candles_r_10", display: "Volatility 10 Index" },
+  { name: "R_25", table: "candles_r_25", display: "Volatility 25 Index" },
+  { name: "R_50", table: "candles_r_50", display: "Volatility 50 Index" },
+  { name: "R_75", table: "candles_r_75", display: "Volatility 75 Index" },
+  { name: "R_100", table: "candles_r_100", display: "Volatility 100 Index" },
+  { name: "1HZ10V", table: "candles_1hz10v", display: "Volatility 10 Index (1s)" },
+  { name: "1HZ25V", table: "candles_1hz25v", display: "Volatility 25 Index (1s)" },
+  { name: "1HZ50V", table: "candles_1hz50v", display: "Volatility 50 Index (1s)" },
+  { name: "1HZ75V", table: "candles_1hz75v", display: "Volatility 75 Index (1s)" },
+  { name: "1HZ100V", table: "candles_1hz100v", display: "Volatility 100 Index (1s)" }
 ];
 
 export class DerivDataCandleService {
   private symbols: SymbolConfig[] = [...SYMBOLS_CONFIG];
   private ws: WebSocket | null = null;
   private appId: number;
-  private dataDir: string;
+  private pool: mysql.Pool;
 
   constructor() {
     this.appId = DERIV_APP_ID;
-    this.dataDir = DATA_DIR;
-    this.ensureDataDirectory();
-  }
-
-  /**
-   * Ensure data directory exists - with Vercel fallback
-   */
-  private async ensureDataDirectory(): Promise<void> {
-    const possiblePaths = [
-      this.dataDir,
-      path.join('/tmp', 'data', 'candles'),  // Vercel fallback
-      path.join(process.cwd(), 'data', 'candles')
-    ];
-    
-    for (const dirPath of possiblePaths) {
-      try {
-        await fs.mkdir(dirPath, { recursive: true });
-        this.dataDir = dirPath;
-        console.log(`✅ Using data directory: ${this.dataDir}`);
-        return;
-      } catch (error) {
-        console.log(`Failed to create ${dirPath}:`, error);
-      }
-    }
-    
-    throw new Error('Could not create data directory in any location');
+    this.pool = mysql.createPool(DB_CONFIG);
   }
 
   /**
@@ -94,55 +77,110 @@ export class DerivDataCandleService {
   }
 
   /**
-   * Get file path for a symbol
+   * Get table name for a symbol
    */
-  private getFilePath(symbolConfig: SymbolConfig): string {
-    return path.join(this.dataDir, symbolConfig.file);
+  private getTableName(symbolConfig: SymbolConfig): string {
+    return symbolConfig.table;
   }
 
   /**
-   * Load candles from JSON file for a symbol
+   * Create table for a specific symbol
+   */
+  private async createTableForSymbol(symbolConfig: SymbolConfig): Promise<void> {
+    const tableName = this.getTableName(symbolConfig);
+    
+    const createTableSQL = `
+      CREATE TABLE IF NOT EXISTS ${tableName} (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        granularity INT NOT NULL,
+        epoch BIGINT NOT NULL,
+        datetime DATETIME NOT NULL,
+        open DECIMAL(20, 8) NOT NULL,
+        high DECIMAL(20, 8) NOT NULL,
+        low DECIMAL(20, 8) NOT NULL,
+        close DECIMAL(20, 8) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_epoch (epoch),
+        INDEX idx_epoch (epoch),
+        INDEX idx_datetime (datetime)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `;
+    
+    await this.pool.execute(createTableSQL);
+    console.log(`✅ Table "${tableName}" created or already exists.`);
+  }
+
+  /**
+   * Create tables for all candle patterns.
+   */
+  async createTables(): Promise<void> {
+    for (const symbolConfig of this.symbols) {
+      await this.createTableForSymbol(symbolConfig);
+    }
+    console.log('All candle tables created or verified.');
+  }
+
+  /**
+   * Load candles from database for a symbol
    */
   private async loadCandles(symbolConfig: SymbolConfig): Promise<Candle[]> {
-    const filePath = this.getFilePath(symbolConfig);
-    try {
-      const data = await fs.readFile(filePath, 'utf-8');
-      return JSON.parse(data);
-    } catch (error: any) {
-      if (error.code === 'ENOENT') {
-        return [];
-      }
-      throw new Error(`Failed to load candles for "${symbolConfig.name}": ${error.message}`);
-    }
+    const tableName = this.getTableName(symbolConfig);
+    
+    const [rows] = await this.pool.execute(`SELECT * FROM ${tableName} ORDER BY epoch ASC`);
+    return rows as Candle[];
   }
 
   /**
-   * Save candles to JSON file for a symbol
+   * Save candles to database for a symbol
    */
   private async saveCandles(symbolConfig: SymbolConfig, candles: Candle[]): Promise<void> {
-    const filePath = this.getFilePath(symbolConfig);
-    await fs.writeFile(filePath, JSON.stringify(candles, null, 2), 'utf-8');
+    const tableName = this.getTableName(symbolConfig);
+    
+    // Clear existing data
+    await this.pool.execute(`DELETE FROM ${tableName}`);
+    
+    // Insert all candles
+    if (candles.length === 0) return;
+    
+    const insertSQL = `
+      INSERT INTO ${tableName} (id, granularity, epoch, datetime, open, high, low, close)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+    
+    for (const candle of candles) {
+      await this.pool.execute(insertSQL, [
+        candle.id,
+        candle.granularity,
+        candle.epoch,
+        candle.datetime,
+        candle.open,
+        candle.high,
+        candle.low,
+        candle.close
+      ]);
+    }
   }
 
   /**
    * Get next ID for a symbol
    */
   private async getNextId(symbolConfig: SymbolConfig): Promise<number> {
-    const candles = await this.loadCandles(symbolConfig);
-    if (candles.length === 0) return 1;
-    return Math.max(...candles.map(c => c.id)) + 1;
+    const tableName = this.getTableName(symbolConfig);
+    
+    const [rows] = await this.pool.execute(`SELECT MAX(id) as max_id FROM ${tableName}`);
+    const maxId = (rows as any[])[0]?.max_id || 0;
+    return maxId + 1;
   }
 
   /**
-   * Get the latest epoch from existing JSON file
+   * Get the latest epoch from database for a symbol
    */
-  private async getLatestEpochFromJSON(symbolConfig: SymbolConfig): Promise<number | null> {
-    const candles = await this.loadCandles(symbolConfig);
-    if (candles.length === 0) return null;
+  private async getLatestEpochFromDB(symbolConfig: SymbolConfig): Promise<number | null> {
+    const tableName = this.getTableName(symbolConfig);
     
-    // Find the maximum epoch
-    const maxEpoch = Math.max(...candles.map(c => c.epoch));
-    return maxEpoch;
+    const [rows] = await this.pool.execute(`SELECT MAX(epoch) as latest_epoch FROM ${tableName}`);
+    const latest = (rows as any[])[0]?.latest_epoch;
+    return latest ? Number(latest) : null;
   }
 
   /**
@@ -259,37 +297,41 @@ export class DerivDataCandleService {
   }
 
   /**
-   * Append a single candle to JSON file
+   * Append a single candle to database
    */
-  private async appendCandleToJSON(symbolConfig: SymbolConfig, candle: any): Promise<void> {
-    const candles = await this.loadCandles(symbolConfig);
+  private async appendCandleToDB(symbolConfig: SymbolConfig, candle: any): Promise<void> {
+    const tableName = this.getTableName(symbolConfig);
     
     // Check if candle with this epoch already exists
-    const exists = candles.some(c => c.epoch === candle.epoch);
+    const [existing] = await this.pool.execute(
+      `SELECT id FROM ${tableName} WHERE epoch = ?`,
+      [candle.epoch]
+    );
     
-    if (exists) {
+    if ((existing as any[]).length > 0) {
       console.log(`   ⚠️ Candle epoch ${candle.epoch} already exists, skipping`);
       return;
     }
     
-    const newCandle: Candle = {
-      id: await this.getNextId(symbolConfig),
-      granularity: GRANULARITY,
-      epoch: candle.epoch,
-      datetime: this.formatDate(candle.epoch),
-      open: parseFloat(candle.open),
-      high: parseFloat(candle.high),
-      low: parseFloat(candle.low),
-      close: parseFloat(candle.close),
-    };
+    const newId = await this.getNextId(symbolConfig);
     
-    candles.push(newCandle);
+    const insertSQL = `
+      INSERT INTO ${tableName} (id, granularity, epoch, datetime, open, high, low, close)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `;
     
-    // Sort by epoch
-    candles.sort((a, b) => a.epoch - b.epoch);
+    await this.pool.execute(insertSQL, [
+      newId,
+      GRANULARITY,
+      candle.epoch,
+      this.formatDate(candle.epoch),
+      parseFloat(candle.open),
+      parseFloat(candle.high),
+      parseFloat(candle.low),
+      parseFloat(candle.close)
+    ]);
     
-    await this.saveCandles(symbolConfig, candles);
-    console.log(`   💾 Appended to: ${this.getFilePath(symbolConfig)}`);
+    console.log(`   💾 Appended to table: ${tableName}`);
   }
 
   /**
@@ -299,7 +341,6 @@ export class DerivDataCandleService {
   async updateLatestCandles(): Promise<{ totalAdded: number; results: any[] }> {
     console.log(`🚀 Starting incremental update - fetching latest completed candles only...`);
     console.log(`⏰ Started at: ${new Date().toISOString()}`);
-    console.log(`📁 Data directory: ${this.dataDir}`);
     
     const lastCompletedEpoch = this.getLastCompletedCandleEpoch();
     const lastCompletedTime = new Date(lastCompletedEpoch * 1000).toISOString();
@@ -311,8 +352,8 @@ export class DerivDataCandleService {
     
     for (const symbolConfig of this.symbols) {
       try {
-        // Get the latest epoch already in JSON
-        const latestEpochInFile = await this.getLatestEpochFromJSON(symbolConfig);
+        // Get the latest epoch already in database
+        const latestEpochInDB = await this.getLatestEpochFromDB(symbolConfig);
         
         // Fetch the latest completed candle from Deriv
         const latestCandle = await this.fetchLatestCompletedCandle(symbolConfig);
@@ -329,7 +370,7 @@ export class DerivDataCandleService {
         }
         
         // Check if we already have this candle
-        if (latestEpochInFile && latestCandle.epoch <= latestEpochInFile) {
+        if (latestEpochInDB && latestCandle.epoch <= latestEpochInDB) {
           console.log(`   ✅ Already have latest candle (epoch: ${latestCandle.epoch})`);
           results.push({ 
             symbol: symbolConfig.name, 
@@ -339,8 +380,8 @@ export class DerivDataCandleService {
             epoch: latestCandle.epoch
           });
         } else {
-          // New candle - append to JSON
-          await this.appendCandleToJSON(symbolConfig, latestCandle);
+          // New candle - append to database
+          await this.appendCandleToDB(symbolConfig, latestCandle);
           totalAdded++;
           results.push({ 
             symbol: symbolConfig.name, 
@@ -396,16 +437,14 @@ export class DerivDataCandleService {
       const symbolConfig = this.symbols.find(s => s.name === symbol);
       if (!symbolConfig) return null;
       
-      const candles = await this.loadCandles(symbolConfig);
+      const tableName = this.getTableName(symbolConfig);
       
-      if (candles.length === 0) return null;
-      
-      // Return the latest candle (newest by epoch)
-      const latest = candles.reduce((latest, current) => 
-        current.epoch > latest.epoch ? current : latest
+      const [rows] = await this.pool.execute(
+        `SELECT * FROM ${tableName} ORDER BY epoch DESC LIMIT 1`
       );
       
-      return latest;
+      const candles = rows as Candle[];
+      return candles.length > 0 ? candles[0] : null;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       console.error(`❌ Error fetching previous candle for ${symbol}:`, errorMessage);
@@ -425,28 +464,36 @@ export class DerivDataCandleService {
     const symbolConfig = this.symbols.find(s => s.name === symbol);
     if (!symbolConfig) return [];
     
-    let candles = await this.loadCandles(symbolConfig);
+    const tableName = this.getTableName(symbolConfig);
+    let query = `SELECT * FROM ${tableName} WHERE 1=1`;
+    const params: any[] = [];
     
     // Filter by date range
     if (options?.startDate) {
-      candles = candles.filter(c => new Date(c.datetime) >= options.startDate!);
+      query += ` AND datetime >= ?`;
+      params.push(options.startDate);
     }
     if (options?.endDate) {
-      candles = candles.filter(c => new Date(c.datetime) <= options.endDate!);
+      query += ` AND datetime <= ?`;
+      params.push(options.endDate);
     }
     
-    // Sort by epoch ascending
-    candles.sort((a, b) => a.epoch - b.epoch);
+    // Order by epoch ascending
+    query += ` ORDER BY epoch ASC`;
     
     // Apply pagination
-    if (options?.offset !== undefined) {
-      const limit = options?.limit || 50;
-      candles = candles.slice(options.offset, options.offset + limit);
-    } else if (options?.limit) {
-      candles = candles.slice(0, options.limit);
+    if (options?.limit) {
+      query += ` LIMIT ?`;
+      params.push(options.limit);
+      
+      if (options?.offset) {
+        query += ` OFFSET ?`;
+        params.push(options.offset);
+      }
     }
     
-    return candles;
+    const [rows] = await this.pool.execute(query, params);
+    return rows as Candle[];
   }
 
   /**
@@ -456,32 +503,14 @@ export class DerivDataCandleService {
     const symbolConfig = this.symbols.find(s => s.name === symbol);
     if (!symbolConfig) return null;
     
-    const candles = await this.loadCandles(symbolConfig);
+    const tableName = this.getTableName(symbolConfig);
     
-    if (candles.length === 0) return null;
-    
-    // Return the candle with the highest epoch
-    return candles.reduce((latest, current) => 
-      current.epoch > latest.epoch ? current : latest
+    const [rows] = await this.pool.execute(
+      `SELECT * FROM ${tableName} ORDER BY epoch DESC LIMIT 1`
     );
-  }
-
-  /**
-   * Create tables - creates JSON files if they don't exist
-   */
-  async createTables(): Promise<void> {
-    console.log('📊 Creating/verifying JSON files for symbols...');
-    for (const symbolConfig of this.symbols) {
-      const filePath = this.getFilePath(symbolConfig);
-      try {
-        await fs.access(filePath);
-        console.log(`✅ File ${symbolConfig.file} already exists`);
-      } catch {
-        // Create empty array if file doesn't exist
-        await this.saveCandles(symbolConfig, []);
-        console.log(`✅ Created new file: ${symbolConfig.file}`);
-      }
-    }
+    
+    const candles = rows as Candle[];
+    return candles.length > 0 ? candles[0] : null;
   }
 
   /**
@@ -503,9 +532,13 @@ export class DerivDataCandleService {
       };
     }
     
-    const candles = await this.loadCandles(symbolConfig);
+    const tableName = this.getTableName(symbolConfig);
     
-    if (candles.length === 0) {
+    // Get total count
+    const [countResult] = await this.pool.execute(`SELECT COUNT(*) as total FROM ${tableName}`);
+    const totalCandles = (countResult as any[])[0].total;
+    
+    if (totalCandles === 0) {
       return {
         totalCandles: 0,
         firstCandle: null,
@@ -514,18 +547,25 @@ export class DerivDataCandleService {
       };
     }
     
-    // Sort by epoch
-    const sortedCandles = [...candles].sort((a, b) => a.epoch - b.epoch);
-    const firstCandle = sortedCandles[0];
-    const lastCandle = sortedCandles[sortedCandles.length - 1];
+    // Get first and last candles
+    const [firstResult] = await this.pool.execute(
+      `SELECT * FROM ${tableName} ORDER BY epoch ASC LIMIT 1`
+    );
+    
+    const [lastResult] = await this.pool.execute(
+      `SELECT * FROM ${tableName} ORDER BY epoch DESC LIMIT 1`
+    );
+    
+    const firstCandle = (firstResult as Candle[])[0];
+    const lastCandle = (lastResult as Candle[])[0];
     
     return {
-      totalCandles: candles.length,
-      firstCandle: firstCandle,
-      lastCandle: lastCandle,
+      totalCandles,
+      firstCandle,
+      lastCandle,
       dateRange: {
-        from: new Date(firstCandle.datetime),
-        to: new Date(lastCandle.datetime),
+        from: firstCandle ? new Date(firstCandle.datetime) : null,
+        to: lastCandle ? new Date(lastCandle.datetime) : null,
       }
     };
   }
@@ -537,8 +577,10 @@ export class DerivDataCandleService {
     const symbolConfig = this.symbols.find(s => s.name === symbol);
     if (!symbolConfig) return false;
     
-    const candles = await this.loadCandles(symbolConfig);
-    return candles.length > 0;
+    const tableName = this.getTableName(symbolConfig);
+    
+    const [rows] = await this.pool.execute(`SELECT COUNT(*) as count FROM ${tableName} LIMIT 1`);
+    return (rows as any[])[0].count > 0;
   }
 
   /**
@@ -553,7 +595,7 @@ export class DerivDataCandleService {
    */
   async initialize(): Promise<void> {
     console.log('🚀 Initializing DerivDataCandleService...');
-    await this.ensureDataDirectory();
+    await this.createTables();
     
     const firstSymbol = this.symbols[0];
     const hasExistingData = await this.hasData(firstSymbol.name);
@@ -575,7 +617,6 @@ export class DerivDataCandleService {
   async fetchInitialCandles(): Promise<{ totalInserted: number; results: any[] }> {
     console.log(`🚀 Starting to fetch all Volatility Indices...`);
     console.log(`⏰ Started at: ${new Date().toISOString()}`);
-    console.log(`📁 Data directory: ${this.dataDir}`);
     console.log(`\n${"=".repeat(60)}`);
     
     const results = [];
@@ -586,7 +627,7 @@ export class DerivDataCandleService {
         // Fetch candles from Deriv
         const candles = await this.fetchCandles(symbolConfig);
         
-        // Upsert to JSON
+        // Upsert to database
         const inserted = await this.upsertCandles(symbolConfig, candles);
         totalInserted += inserted;
 
@@ -706,42 +747,43 @@ export class DerivDataCandleService {
   }
 
   /**
-   * Upsert candles to JSON file
+   * Upsert candles to database
    */
   private async upsertCandles(symbolConfig: SymbolConfig, candles: any[]): Promise<number> {
-    let existingCandles = await this.loadCandles(symbolConfig);
+    const tableName = this.getTableName(symbolConfig);
     let upsertCount = 0;
+    
+    // Get existing candles
+    const existingCandles = await this.loadCandles(symbolConfig);
+    const existingEpochs = new Set(existingCandles.map(c => c.epoch));
     
     const sortedCandles = [...candles].sort((a, b) => a.epoch - b.epoch);
     
     for (const candle of sortedCandles) {
-      const epoch = candle.epoch;
-      const existingIndex = existingCandles.findIndex(c => c.epoch === epoch);
-      
-      const newCandle: Candle = {
-        id: existingIndex !== -1 ? existingCandles[existingIndex].id : await this.getNextId(symbolConfig),
-        granularity: GRANULARITY,
-        epoch: epoch,
-        datetime: this.formatDate(epoch),
-        open: parseFloat(candle.open),
-        high: parseFloat(candle.high),
-        low: parseFloat(candle.low),
-        close: parseFloat(candle.close),
-      };
-      
-      if (existingIndex !== -1) {
-        existingCandles[existingIndex] = newCandle;
-        upsertCount++;
-      } else {
-        existingCandles.push(newCandle);
+      if (!existingEpochs.has(candle.epoch)) {
+        const newId = await this.getNextId(symbolConfig);
+        
+        const insertSQL = `
+          INSERT INTO ${tableName} (id, granularity, epoch, datetime, open, high, low, close)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+        
+        await this.pool.execute(insertSQL, [
+          newId,
+          GRANULARITY,
+          candle.epoch,
+          this.formatDate(candle.epoch),
+          parseFloat(candle.open),
+          parseFloat(candle.high),
+          parseFloat(candle.low),
+          parseFloat(candle.close)
+        ]);
+        
         upsertCount++;
       }
     }
     
-    existingCandles.sort((a, b) => a.epoch - b.epoch);
-    await this.saveCandles(symbolConfig, existingCandles);
-    console.log(`   💾 Saved to: ${this.getFilePath(symbolConfig)}`);
-    
+    console.log(`   💾 Saved to table: ${tableName}`);
     return upsertCount;
   }
 
@@ -750,15 +792,27 @@ export class DerivDataCandleService {
    */
   async forceFullRefresh(): Promise<void> {
     console.log('🔄 Force refreshing all candles for all symbols...');
+    
+    // Clear existing data from all tables
+    for (const symbolConfig of this.symbols) {
+      const tableName = this.getTableName(symbolConfig);
+      await this.pool.execute(`DELETE FROM ${tableName}`);
+      console.log(`🗑️ Cleared table: ${tableName}`);
+    }
+    
     await this.fetchInitialCandles();
     console.log('✅ Force refresh completed!');
   }
 
-  closeConnection(): void {
+  /**
+   * Close database connection pool
+   */
+  async closeConnection(): Promise<void> {
+    await this.pool.end();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
-    console.log('Connection closed');
+    console.log('Database connection closed');
   }
 }

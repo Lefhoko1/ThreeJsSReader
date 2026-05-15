@@ -1,9 +1,16 @@
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import mysql from 'mysql2/promise';
 
-// ─── Config ───────────────────────────────────────────────────────
-// Data directory for storing sessions
-const DATA_DIR = path.join(process.cwd(), 'data', 'sessions');
+// ─── Database Config ───────────────────────────────────────────────────────
+const DB_CONFIG = {
+  host: 'sql5.freesqldatabase.com',
+  user: 'sql5826978',
+  password: 'Cd5wHyRQbs',
+  database: 'sql5826978',
+  port: 3306,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+};
 
 export interface Session {
   id: number;
@@ -27,85 +34,41 @@ export interface SessionData {
 
 export class SessionService {
   private readonly TABLE_NAME = 'sessions';
-  private dataDir: string;
-  private filePath: string;
+  private pool: mysql.Pool;
 
   constructor() {
-    this.dataDir = DATA_DIR;
-    this.filePath = path.join(this.dataDir, `${this.TABLE_NAME}.json`);
-    this.ensureDataDirectory();
+    this.pool = mysql.createPool(DB_CONFIG);
   }
 
   /**
-   * Ensure data directory exists
+   * Create sessions table if it doesn't exist
    */
-  private async ensureDataDirectory(): Promise<void> {
-    try {
-      await fs.access(this.dataDir);
-    } catch {
-      await fs.mkdir(this.dataDir, { recursive: true });
-    }
+  private async createTable(): Promise<void> {
+    const createTableSQL = `
+      CREATE TABLE IF NOT EXISTS ${this.TABLE_NAME} (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        sessionid VARCHAR(255) NOT NULL UNIQUE,
+        symbol VARCHAR(50) NOT NULL,
+        sessionresult VARCHAR(10) NULL,
+        firstbetAmount DECIMAL(20, 8) NOT NULL,
+        created_at DATETIME NOT NULL,
+        updated_at DATETIME NOT NULL,
+        INDEX idx_sessionid (sessionid),
+        INDEX idx_symbol (symbol),
+        INDEX idx_sessionresult (sessionresult),
+        INDEX idx_created_at (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `;
+    
+    await this.pool.execute(createTableSQL);
+    console.log('Sessions table created or verified.');
   }
 
   /**
-   * Ensure sessions file exists
-   */
-  private async ensureFile(): Promise<void> {
-    try {
-      await fs.access(this.filePath);
-    } catch {
-      // Create empty array if file doesn't exist
-      await this.saveSessions([]);
-    }
-  }
-
-  /**
-   * Load sessions from JSON file
-   */
-  private async loadSessions(): Promise<Session[]> {
-    try {
-      const data = await fs.readFile(this.filePath, 'utf-8');
-      const sessionsData: SessionData[] = JSON.parse(data);
-      // Convert string dates back to Date objects
-      return sessionsData.map(session => ({
-        ...session,
-        created_at: new Date(session.created_at),
-        updated_at: new Date(session.updated_at)
-      }));
-    } catch (error: any) {
-      if (error.code === 'ENOENT') {
-        return [];
-      }
-      throw new Error(`Failed to load sessions: ${error.message}`);
-    }
-  }
-
-  /**
-   * Save sessions to JSON file
-   */
-  private async saveSessions(sessions: Session[]): Promise<void> {
-    const sessionsData: SessionData[] = sessions.map(session => ({
-      ...session,
-      created_at: session.created_at.toISOString(),
-      updated_at: session.updated_at.toISOString()
-    }));
-    await fs.writeFile(this.filePath, JSON.stringify(sessionsData, null, 2), 'utf-8');
-  }
-
-  /**
-   * Get next ID for a session
-   */
-  private async getNextId(): Promise<number> {
-    const sessions = await this.loadSessions();
-    if (sessions.length === 0) return 1;
-    return Math.max(...sessions.map(s => s.id)) + 1;
-  }
-
-  /**
-   * Ensure sessions table exists (creates JSON file if needed)
+   * Ensure sessions table exists
    */
   private async ensureTable(): Promise<void> {
-    await this.ensureFile();
+    await this.createTable();
   }
 
   /**
@@ -114,23 +77,37 @@ export class SessionService {
   async createSession(data: { sessionid: string; symbol: string; sessionresult?: string | null; firstbetAmount: number }): Promise<Session> {
     await this.ensureTable();
     
-    const sessions = await this.loadSessions();
     const now = new Date();
+    const insertSQL = `
+      INSERT INTO ${this.TABLE_NAME} (sessionid, symbol, sessionresult, firstbetAmount, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `;
     
-    const newSession: Session = {
-      id: await this.getNextId(),
-      sessionid: data.sessionid,
-      symbol: data.symbol,
-      sessionresult: data.sessionresult || null,
-      firstbetAmount: data.firstbetAmount,
-      created_at: now,
-      updated_at: now
+    const [result] = await this.pool.execute(insertSQL, [
+      data.sessionid,
+      data.symbol,
+      data.sessionresult || null,
+      data.firstbetAmount,
+      now,
+      now
+    ]);
+    
+    // Fetch the created record
+    const [rows] = await this.pool.execute(
+      `SELECT * FROM ${this.TABLE_NAME} WHERE id = ?`,
+      [(result as any).insertId]
+    );
+    
+    const session = (rows as any[])[0];
+    return {
+      id: session.id,
+      sessionid: session.sessionid,
+      symbol: session.symbol,
+      sessionresult: session.sessionresult,
+      firstbetAmount: parseFloat(session.firstbetAmount),
+      created_at: new Date(session.created_at),
+      updated_at: new Date(session.updated_at)
     };
-    
-    sessions.push(newSession);
-    await this.saveSessions(sessions);
-    
-    return newSession;
   }
 
   /**
@@ -139,10 +116,24 @@ export class SessionService {
   async getSessionById(sessionid: string): Promise<Session | null> {
     await this.ensureTable();
     
-    const sessions = await this.loadSessions();
-    const session = sessions.find(s => s.sessionid === sessionid);
+    const [rows] = await this.pool.execute(
+      `SELECT * FROM ${this.TABLE_NAME} WHERE sessionid = ?`,
+      [sessionid]
+    );
     
-    return session || null;
+    const sessions = rows as any[];
+    if (sessions.length === 0) return null;
+    
+    const session = sessions[0];
+    return {
+      id: session.id,
+      sessionid: session.sessionid,
+      symbol: session.symbol,
+      sessionresult: session.sessionresult,
+      firstbetAmount: parseFloat(session.firstbetAmount),
+      created_at: new Date(session.created_at),
+      updated_at: new Date(session.updated_at)
+    };
   }
 
   /**
@@ -157,45 +148,51 @@ export class SessionService {
   }): Promise<Session[]> {
     await this.ensureTable();
     
-    let sessions = await this.loadSessions();
+    let query = `SELECT * FROM ${this.TABLE_NAME} WHERE 1=1`;
+    const params: any[] = [];
     
     // Apply filters
     if (options?.symbol) {
-      sessions = sessions.filter(s => s.symbol === options.symbol);
+      query += ` AND symbol = ?`;
+      params.push(options.symbol);
     }
     if (options?.sessionresult) {
-      sessions = sessions.filter(s => s.sessionresult === options.sessionresult);
+      query += ` AND sessionresult = ?`;
+      params.push(options.sessionresult);
     }
     
     // Apply sorting
     if (options?.order && options.order.length > 0) {
       const [column, direction] = options.order[0];
-      const sortDirection = direction === 'DESC' ? -1 : 1;
-      sessions.sort((a, b) => {
-        const aVal = a[column as keyof Session];
-        const bVal = b[column as keyof Session];
-        
-        if (aVal === undefined || aVal === null) return 1;
-        if (bVal === undefined || bVal === null) return -1;
-        
-        if (aVal < bVal) return -sortDirection;
-        if (aVal > bVal) return sortDirection;
-        return 0;
-      });
+      query += ` ORDER BY ${column} ${direction}`;
     } else {
       // Default order by created_at descending
-      sessions.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+      query += ` ORDER BY created_at DESC`;
     }
     
     // Apply pagination
-    if (options?.offset !== undefined) {
-      const limit = options?.limit || 10;
-      sessions = sessions.slice(options.offset, options.offset + limit);
-    } else if (options?.limit) {
-      sessions = sessions.slice(0, options.limit);
+    if (options?.limit) {
+      query += ` LIMIT ?`;
+      params.push(options.limit);
+      
+      if (options?.offset) {
+        query += ` OFFSET ?`;
+        params.push(options.offset);
+      }
     }
     
-    return sessions;
+    const [rows] = await this.pool.execute(query, params);
+    const sessions = rows as any[];
+    
+    return sessions.map(session => ({
+      id: session.id,
+      sessionid: session.sessionid,
+      symbol: session.symbol,
+      sessionresult: session.sessionresult,
+      firstbetAmount: parseFloat(session.firstbetAmount),
+      created_at: new Date(session.created_at),
+      updated_at: new Date(session.updated_at)
+    }));
   }
 
   /**
@@ -208,28 +205,41 @@ export class SessionService {
   }): Promise<Session[]> {
     await this.ensureTable();
     
-    let sessions = await this.loadSessions();
-    
-    // Filter by symbol
-    sessions = sessions.filter(s => s.symbol === symbol);
+    let query = `SELECT * FROM ${this.TABLE_NAME} WHERE symbol = ?`;
+    const params: any[] = [symbol];
     
     // Filter by session result
     if (options?.sessionresult) {
-      sessions = sessions.filter(s => s.sessionresult === options.sessionresult);
+      query += ` AND sessionresult = ?`;
+      params.push(options.sessionresult);
     }
     
     // Sort by created_at descending
-    sessions.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+    query += ` ORDER BY created_at DESC`;
     
     // Apply pagination
-    if (options?.offset !== undefined) {
-      const limit = options?.limit || 10;
-      sessions = sessions.slice(options.offset, options.offset + limit);
-    } else if (options?.limit) {
-      sessions = sessions.slice(0, options.limit);
+    if (options?.limit) {
+      query += ` LIMIT ?`;
+      params.push(options.limit);
+      
+      if (options?.offset) {
+        query += ` OFFSET ?`;
+        params.push(options.offset);
+      }
     }
     
-    return sessions;
+    const [rows] = await this.pool.execute(query, params);
+    const sessions = rows as any[];
+    
+    return sessions.map(session => ({
+      id: session.id,
+      sessionid: session.sessionid,
+      symbol: session.symbol,
+      sessionresult: session.sessionresult,
+      firstbetAmount: parseFloat(session.firstbetAmount),
+      created_at: new Date(session.created_at),
+      updated_at: new Date(session.updated_at)
+    }));
   }
 
   /**
@@ -238,19 +248,34 @@ export class SessionService {
   async updateSession(sessionid: string, updates: Partial<{ symbol: string; sessionresult: string | null; firstbetAmount: number }>): Promise<Session | null> {
     await this.ensureTable();
     
-    const sessions = await this.loadSessions();
-    const index = sessions.findIndex(s => s.sessionid === sessionid);
+    const updateFields: string[] = [];
+    const values: any[] = [];
     
-    if (index === -1) return null;
+    if (updates.symbol !== undefined) {
+      updateFields.push('symbol = ?');
+      values.push(updates.symbol);
+    }
+    if (updates.sessionresult !== undefined) {
+      updateFields.push('sessionresult = ?');
+      values.push(updates.sessionresult);
+    }
+    if (updates.firstbetAmount !== undefined) {
+      updateFields.push('firstbetAmount = ?');
+      values.push(updates.firstbetAmount);
+    }
     
-    sessions[index] = {
-      ...sessions[index],
-      ...updates,
-      updated_at: new Date()
-    };
+    if (updateFields.length === 0) {
+      return this.getSessionById(sessionid);
+    }
     
-    await this.saveSessions(sessions);
-    return sessions[index];
+    updateFields.push('updated_at = ?');
+    values.push(new Date());
+    values.push(sessionid);
+    
+    const updateSQL = `UPDATE ${this.TABLE_NAME} SET ${updateFields.join(', ')} WHERE sessionid = ?`;
+    await this.pool.execute(updateSQL, values);
+    
+    return this.getSessionById(sessionid);
   }
 
   /**
@@ -266,15 +291,12 @@ export class SessionService {
   async deleteSession(sessionid: string): Promise<boolean> {
     await this.ensureTable();
     
-    const sessions = await this.loadSessions();
-    const filteredSessions = sessions.filter(s => s.sessionid !== sessionid);
+    const [result] = await this.pool.execute(
+      `DELETE FROM ${this.TABLE_NAME} WHERE sessionid = ?`,
+      [sessionid]
+    );
     
-    if (filteredSessions.length === sessions.length) {
-      return false;
-    }
-    
-    await this.saveSessions(filteredSessions);
-    return true;
+    return (result as any).affectedRows > 0;
   }
 
   /**
@@ -283,14 +305,12 @@ export class SessionService {
   async deleteSessionsBySymbol(symbol: string): Promise<number> {
     await this.ensureTable();
     
-    const sessions = await this.loadSessions();
-    const initialCount = sessions.length;
-    const filteredSessions = sessions.filter(s => s.symbol !== symbol);
+    const [result] = await this.pool.execute(
+      `DELETE FROM ${this.TABLE_NAME} WHERE symbol = ?`,
+      [symbol]
+    );
     
-    const deletedCount = initialCount - filteredSessions.length;
-    await this.saveSessions(filteredSessions);
-    
-    return deletedCount;
+    return (result as any).affectedRows;
   }
 
   /**
@@ -307,28 +327,36 @@ export class SessionService {
   }> {
     await this.ensureTable();
     
-    let sessions = await this.loadSessions();
+    let query = `SELECT 
+      COUNT(*) as totalSessions,
+      SUM(CASE WHEN sessionresult = 'win' THEN 1 ELSE 0 END) as successfulSessions,
+      SUM(CASE WHEN sessionresult = 'loss' THEN 1 ELSE 0 END) as failedSessions,
+      SUM(CASE WHEN sessionresult IS NULL THEN 1 ELSE 0 END) as pendingSessions,
+      SUM(firstbetAmount) as totalFirstBetAmount,
+      AVG(firstbetAmount) as averageFirstBetAmount
+      FROM ${this.TABLE_NAME} WHERE 1=1`;
     
-    // Filter by symbol if provided
+    const params: any[] = [];
+    
     if (symbol) {
-      sessions = sessions.filter(s => s.symbol === symbol);
+      query += ` AND symbol = ?`;
+      params.push(symbol);
     }
     
-    const totalSessions = sessions.length;
-    const successfulSessions = sessions.filter(s => s.sessionresult === 'win').length;
-    const failedSessions = sessions.filter(s => s.sessionresult === 'loss').length;
-    const pendingSessions = sessions.filter(s => !s.sessionresult).length;
+    const [rows] = await this.pool.execute(query, params);
+    const stats = (rows as any[])[0];
     
-    const totalFirstBetAmount = sessions.reduce((sum, s) => sum + (s.firstbetAmount || 0), 0);
+    const totalSessions = parseInt(stats.totalSessions) || 0;
+    const successfulSessions = parseInt(stats.successfulSessions) || 0;
     
     return {
       totalSessions,
-      successfulSessions,
-      failedSessions,
-      pendingSessions,
+      successfulSessions: successfulSessions,
+      failedSessions: parseInt(stats.failedSessions) || 0,
+      pendingSessions: parseInt(stats.pendingSessions) || 0,
       winRate: totalSessions > 0 ? (successfulSessions / totalSessions) * 100 : 0,
-      totalFirstBetAmount,
-      averageFirstBetAmount: totalSessions > 0 ? totalFirstBetAmount / totalSessions : 0
+      totalFirstBetAmount: parseFloat(stats.totalFirstBetAmount) || 0,
+      averageFirstBetAmount: parseFloat(stats.averageFirstBetAmount) || 0
     };
   }
 
@@ -338,31 +366,31 @@ export class SessionService {
   async getRecentSessions(days: number = 7, symbol?: string): Promise<Session[]> {
     await this.ensureTable();
     
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - days);
+    let query = `
+      SELECT * FROM ${this.TABLE_NAME} 
+      WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+    `;
+    const params: any[] = [days];
     
-    let sessions = await this.loadSessions();
-    
-    // Filter by date
-    sessions = sessions.filter(s => s.created_at >= cutoffDate);
-    
-    // Filter by symbol if provided
     if (symbol) {
-      sessions = sessions.filter(s => s.symbol === symbol);
+      query += ` AND symbol = ?`;
+      params.push(symbol);
     }
     
-    // Sort by created_at descending
-    sessions.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+    query += ` ORDER BY created_at DESC`;
     
-    return sessions;
-  }
-
-  /**
-   * Create the sessions table if it doesn't exist.
-   */
-  async createTable(): Promise<void> {
-    await this.ensureTable();
-    console.log('Sessions JSON file created or verified.');
+    const [rows] = await this.pool.execute(query, params);
+    const sessions = rows as any[];
+    
+    return sessions.map(session => ({
+      id: session.id,
+      sessionid: session.sessionid,
+      symbol: session.symbol,
+      sessionresult: session.sessionresult,
+      firstbetAmount: parseFloat(session.firstbetAmount),
+      created_at: new Date(session.created_at),
+      updated_at: new Date(session.updated_at)
+    }));
   }
 
   /**
@@ -371,8 +399,12 @@ export class SessionService {
   async sessionExists(sessionid: string): Promise<boolean> {
     await this.ensureTable();
     
-    const sessions = await this.loadSessions();
-    return sessions.some(s => s.sessionid === sessionid);
+    const [rows] = await this.pool.execute(
+      `SELECT COUNT(*) as count FROM ${this.TABLE_NAME} WHERE sessionid = ?`,
+      [sessionid]
+    );
+    
+    return (rows as any[])[0].count > 0;
   }
 
   /**
@@ -381,28 +413,47 @@ export class SessionService {
   async batchCreateSessions(sessions: Array<{ sessionid: string; symbol: string; sessionresult?: string | null; firstbetAmount: number }>): Promise<Session[]> {
     await this.ensureTable();
     
-    const existingSessions = await this.loadSessions();
     const now = new Date();
-    const newSessions: Session[] = [];
+    const values: any[] = [];
+    const placeholders: string[] = [];
     
-    for (const sessionData of sessions) {
-      const newId = await this.getNextId();
-      const newSession: Session = {
-        id: newId,
-        sessionid: sessionData.sessionid,
-        symbol: sessionData.symbol,
-        sessionresult: sessionData.sessionresult || null,
-        firstbetAmount: sessionData.firstbetAmount,
-        created_at: now,
-        updated_at: now
-      };
-      newSessions.push(newSession);
+    for (const session of sessions) {
+      placeholders.push('(?, ?, ?, ?, ?, ?)');
+      values.push(
+        session.sessionid,
+        session.symbol,
+        session.sessionresult || null,
+        session.firstbetAmount,
+        now,
+        now
+      );
     }
     
-    const allSessions = [...existingSessions, ...newSessions];
-    await this.saveSessions(allSessions);
+    const insertSQL = `
+      INSERT IGNORE INTO ${this.TABLE_NAME} (sessionid, symbol, sessionresult, firstbetAmount, created_at, updated_at)
+      VALUES ${placeholders.join(', ')}
+    `;
     
-    return newSessions;
+    await this.pool.execute(insertSQL, values);
+    
+    // Fetch all created sessions
+    const sessionIds = sessions.map(s => s.sessionid);
+    const placeholdersForSelect = sessionIds.map(() => '?').join(',');
+    const [rows] = await this.pool.execute(
+      `SELECT * FROM ${this.TABLE_NAME} WHERE sessionid IN (${placeholdersForSelect})`,
+      sessionIds
+    );
+    
+    const createdSessions = rows as any[];
+    return createdSessions.map(session => ({
+      id: session.id,
+      sessionid: session.sessionid,
+      symbol: session.symbol,
+      sessionresult: session.sessionresult,
+      firstbetAmount: parseFloat(session.firstbetAmount),
+      created_at: new Date(session.created_at),
+      updated_at: new Date(session.updated_at)
+    }));
   }
 
   /**
@@ -411,9 +462,11 @@ export class SessionService {
   async getUniqueSymbols(): Promise<string[]> {
     await this.ensureTable();
     
-    const sessions = await this.loadSessions();
-    const symbols = new Set(sessions.map(s => s.symbol));
-    return Array.from(symbols);
+    const [rows] = await this.pool.execute(
+      `SELECT DISTINCT symbol FROM ${this.TABLE_NAME} ORDER BY symbol`
+    );
+    
+    return (rows as any[]).map(row => row.symbol);
   }
 
   /**
@@ -422,12 +475,13 @@ export class SessionService {
   async getSessionCountBySymbol(): Promise<Map<string, number>> {
     await this.ensureTable();
     
-    const sessions = await this.loadSessions();
-    const countMap = new Map<string, number>();
+    const [rows] = await this.pool.execute(
+      `SELECT symbol, COUNT(*) as count FROM ${this.TABLE_NAME} GROUP BY symbol`
+    );
     
-    for (const session of sessions) {
-      const count = countMap.get(session.symbol) || 0;
-      countMap.set(session.symbol, count + 1);
+    const countMap = new Map<string, number>();
+    for (const row of rows as any[]) {
+      countMap.set(row.symbol, row.count);
     }
     
     return countMap;
@@ -439,42 +493,47 @@ export class SessionService {
   async deleteOldSessions(olderThan: Date): Promise<number> {
     await this.ensureTable();
     
-    const sessions = await this.loadSessions();
-    const initialCount = sessions.length;
-    const filteredSessions = sessions.filter(s => s.created_at >= olderThan);
+    const [result] = await this.pool.execute(
+      `DELETE FROM ${this.TABLE_NAME} WHERE created_at < ?`,
+      [olderThan]
+    );
     
-    const deletedCount = initialCount - filteredSessions.length;
-    await this.saveSessions(filteredSessions);
-    
-    return deletedCount;
+    return (result as any).affectedRows;
   }
 
   /**
-   * Export all sessions to a backup file
+   * Export all sessions to a backup file (optional - keeps JSON export but not required for DB)
    */
   async exportToBackup(backupPath?: string): Promise<string> {
-    await this.ensureTable();
-    
-    const sessions = await this.loadSessions();
-    const backupFilePath = backupPath || path.join(this.dataDir, `sessions_backup_${Date.now()}.json`);
-    
-    const sessionsData: SessionData[] = sessions.map(session => ({
-      ...session,
-      created_at: session.created_at.toISOString(),
-      updated_at: session.updated_at.toISOString()
-    }));
-    
-    await fs.writeFile(backupFilePath, JSON.stringify(sessionsData, null, 2), 'utf-8');
-    console.log(`Sessions exported to ${backupFilePath}`);
-    
-    return backupFilePath;
+    // This method is kept for compatibility but now returns a message
+    // since data is already in MySQL
+    const exportFile = backupPath || `sessions_backup_${Date.now()}.json`;
+    console.log(`Data is in MySQL database. To backup, use mysqldump. Export path requested: ${exportFile}`);
+    return exportFile;
   }
 
   /**
    * Clear all sessions (use with caution)
    */
   async clearAllSessions(): Promise<void> {
-    await this.saveSessions([]);
+    await this.ensureTable();
+    await this.pool.execute(`DELETE FROM ${this.TABLE_NAME}`);
     console.log('All sessions cleared');
+  }
+
+  /**
+   * Initialize the database table
+   */
+  async initialize(): Promise<void> {
+    await this.ensureTable();
+    console.log('Session service initialized');
+  }
+
+  /**
+   * Close database connection pool
+   */
+  async closeConnection(): Promise<void> {
+    await this.pool.end();
+    console.log('Database connection closed');
   }
 }
