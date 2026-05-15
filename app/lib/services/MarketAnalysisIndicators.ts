@@ -58,12 +58,23 @@ export class MarketAnalysisIndicators {
   }
 
   /**
-   * Get table name for a symbol
+   * Get table name for a symbol - MUST MATCH DerivDataCandleService table names
    */
   private getTableName(symbol: string): string {
-    let tableName = `candle_${symbol.toLowerCase()}`;
-    tableName = tableName.replace(/[^a-z0-9_]/g, '_');
-    return tableName;
+    // Match the exact table names from DerivDataCandleService
+    const tableMap: { [key: string]: string } = {
+      'R_10': 'candles_r_10',
+      'R_25': 'candles_r_25',
+      'R_50': 'candles_r_50',
+      'R_75': 'candles_r_75',
+      'R_100': 'candles_r_100',
+      '1HZ10V': 'candles_1hz10v',
+      '1HZ25V': 'candles_1hz25v',
+      '1HZ50V': 'candles_1hz50v',
+      '1HZ75V': 'candles_1hz75v',
+      '1HZ100V': 'candles_1hz100v',
+    };
+    return tableMap[symbol] || `candles_${symbol.toLowerCase()}`;
   }
 
   /**
@@ -75,17 +86,18 @@ export class MarketAnalysisIndicators {
     const createTableSQL = `
       CREATE TABLE IF NOT EXISTS ${tableName} (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        timestamp DATETIME NOT NULL,
+        symbol VARCHAR(50) NOT NULL,
+        granularity INT NOT NULL,
+        epoch BIGINT NOT NULL,
+        datetime DATETIME NOT NULL,
         open DECIMAL(20, 8) NOT NULL,
         high DECIMAL(20, 8) NOT NULL,
         low DECIMAL(20, 8) NOT NULL,
         close DECIMAL(20, 8) NOT NULL,
-        volume DECIMAL(20, 8),
-        epoch BIGINT,
-        datetime VARCHAR(50),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY unique_timestamp (timestamp),
-        INDEX idx_timestamp (timestamp)
+        UNIQUE KEY unique_epoch (epoch),
+        INDEX idx_epoch (epoch),
+        INDEX idx_datetime (datetime)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `;
     
@@ -103,6 +115,14 @@ export class MarketAnalysisIndicators {
   }
 
   /**
+   * Initialize the service
+   */
+  async initialize(): Promise<void> {
+    await this.createTables();
+    console.log('Market analysis tables initialized');
+  }
+
+  /**
    * Load candles from database for a symbol
    */
   private async loadCandles(symbol: string): Promise<CandleData[]> {
@@ -110,7 +130,7 @@ export class MarketAnalysisIndicators {
     
     try {
       const [rows] = await this.pool.execute(
-        `SELECT timestamp, open, high, low, close, volume, epoch, datetime 
+        `SELECT timestamp, open, high, low, close, epoch, datetime 
          FROM ${tableName} 
          ORDER BY timestamp ASC`
       );
@@ -122,7 +142,6 @@ export class MarketAnalysisIndicators {
         high: parseFloat(candle.high),
         low: parseFloat(candle.low),
         close: parseFloat(candle.close),
-        volume: candle.volume ? parseFloat(candle.volume) : undefined,
         epoch: candle.epoch,
         datetime: candle.datetime
       }));
@@ -577,27 +596,10 @@ export class MarketAnalysisIndicators {
   }
 
   /**
-   * Refresh data for a specific symbol (load latest from database)
-   */
-  async refreshSymbolData(symbol: string): Promise<void> {
-    // This method is useful if you want to reload data
-    // The actual loading happens in getRecentCandles
-    console.log(`Data for ${symbol} will be refreshed on next analysis`);
-  }
-
-  /**
    * Get all available symbols
    */
   getSymbols(): string[] {
     return [...this.symbols];
-  }
-
-  /**
-   * Initialize database tables for all symbols
-   */
-  async initialize(): Promise<void> {
-    await this.createTables();
-    console.log('Market analysis tables initialized');
   }
 
   /**
