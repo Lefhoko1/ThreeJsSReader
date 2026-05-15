@@ -81,11 +81,11 @@ export class DerivTradingService {
    * Create tables if they don't exist
    */
   private async createTables(): Promise<void> {
-    // Create trades table
+    // Create trades table with fixed index lengths
     const createTradesTableSQL = `
       CREATE TABLE IF NOT EXISTS trade_history (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        contract_id VARCHAR(255) NOT NULL UNIQUE,
+        contract_id VARCHAR(255) NOT NULL,
         symbol VARCHAR(50) NOT NULL,
         contract_type ENUM('CALL', 'PUT') NOT NULL,
         amount DECIMAL(20, 8) NOT NULL,
@@ -102,10 +102,11 @@ export class DerivTradingService {
         balance_after DECIMAL(20, 8),
         created_at DATETIME NOT NULL,
         updated_at DATETIME NOT NULL,
-        INDEX idx_contract_id (contract_id),
+        INDEX idx_contract_id (contract_id(191)),
         INDEX idx_symbol (symbol),
         INDEX idx_status (status),
-        INDEX idx_created_at (created_at)
+        INDEX idx_created_at (created_at),
+        UNIQUE KEY unique_contract_id (contract_id(191))
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `;
     
@@ -122,13 +123,22 @@ export class DerivTradingService {
         timestamp DATETIME NOT NULL,
         INDEX idx_type (type),
         INDEX idx_trade_id (trade_id),
-        INDEX idx_timestamp (timestamp)
+        INDEX idx_timestamp (timestamp),
+        INDEX idx_contract_id (contract_id(191))
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `;
     
     await this.pool.execute(createLogTableSQL);
     
     console.log('✅ Trade tables created or already exist');
+  }
+
+  /**
+   * Initialize the service
+   */
+  async initialize(): Promise<void> {
+    await this.createTables();
+    console.log('DerivTradingService initialized');
   }
 
   /**
@@ -386,14 +396,6 @@ export class DerivTradingService {
     await this.pool.execute('DELETE FROM trade_history');
     await this.pool.execute('DELETE FROM transaction_log');
     console.log('Trade history cleared');
-  }
-
-  /**
-   * Initialize database tables
-   */
-  async initialize(): Promise<void> {
-    await this.createTables();
-    console.log('Database tables initialized');
   }
 
   async connect(): Promise<void> {
