@@ -17,6 +17,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
     
+    // STEP 1: Create tables first (if they don't exist)
+    console.log('📋 Creating database tables...');
+    await candleService.createTables();
+    console.log('✅ Tables created or verified');
+    
+    // STEP 2: Fetch initial candle data
     console.log('📊 Fetching initial candle data...');
     const result = await candleService.fetchInitialCandles();
     
