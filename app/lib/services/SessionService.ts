@@ -47,16 +47,17 @@ export class SessionService {
     const createTableSQL = `
       CREATE TABLE IF NOT EXISTS ${this.TABLE_NAME} (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        sessionid VARCHAR(255) NOT NULL UNIQUE,
+        sessionid VARCHAR(255) NOT NULL,
         symbol VARCHAR(50) NOT NULL,
         sessionresult VARCHAR(10) NULL,
         firstbetAmount DECIMAL(20, 8) NOT NULL,
         created_at DATETIME NOT NULL,
         updated_at DATETIME NOT NULL,
-        INDEX idx_sessionid (sessionid),
+        INDEX idx_sessionid (sessionid(191)),
         INDEX idx_symbol (symbol),
         INDEX idx_sessionresult (sessionresult),
-        INDEX idx_created_at (created_at)
+        INDEX idx_created_at (created_at),
+        UNIQUE KEY unique_sessionid (sessionid(191))
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `;
     
@@ -69,6 +70,14 @@ export class SessionService {
    */
   private async ensureTable(): Promise<void> {
     await this.createTable();
+  }
+
+  /**
+   * Initialize the service
+   */
+  async initialize(): Promise<void> {
+    await this.createTable();
+    console.log('SessionService initialized');
   }
 
   /**
@@ -505,8 +514,6 @@ export class SessionService {
    * Export all sessions to a backup file (optional - keeps JSON export but not required for DB)
    */
   async exportToBackup(backupPath?: string): Promise<string> {
-    // This method is kept for compatibility but now returns a message
-    // since data is already in MySQL
     const exportFile = backupPath || `sessions_backup_${Date.now()}.json`;
     console.log(`Data is in MySQL database. To backup, use mysqldump. Export path requested: ${exportFile}`);
     return exportFile;
@@ -519,14 +526,6 @@ export class SessionService {
     await this.ensureTable();
     await this.pool.execute(`DELETE FROM ${this.TABLE_NAME}`);
     console.log('All sessions cleared');
-  }
-
-  /**
-   * Initialize the database table
-   */
-  async initialize(): Promise<void> {
-    await this.ensureTable();
-    console.log('Session service initialized');
   }
 
   /**
