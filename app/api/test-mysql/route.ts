@@ -1,10 +1,9 @@
-// app/api/test-database/route.ts
+// app/api/test-mysql/route.ts
 import { NextResponse } from 'next/server';
 import mysql from 'mysql2/promise';
 
 export async function POST(request: Request) {
   try {
-    // Database configuration
     const dbConfig = {
       host: 'sql5.freesqldatabase.com',
       user: 'sql5826978',
@@ -14,18 +13,16 @@ export async function POST(request: Request) {
       connectTimeout: 30000
     };
 
-    // Create connection
     const connection = await mysql.createConnection(dbConfig);
-    
     const results: any = {};
 
-    // 1. Test connection
+    // Test connection
     await connection.query('SELECT 1');
     results.connection = '✅ Connected successfully';
 
-    // 2. Create table (if not exists)
+    // Create table
     await connection.query(`
-      CREATE TABLE IF NOT EXISTS nextjs_test_data (
+      CREATE TABLE IF NOT EXISTS mysql_test_data (
         id INT AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         price DECIMAL(10, 2) NOT NULL,
@@ -36,10 +33,9 @@ export async function POST(request: Request) {
     `);
     results.create_table = '✅ Table created';
 
-    // 3. Clear old data
-    await connection.query('DELETE FROM nextjs_test_data');
+    // Clear and seed
+    await connection.query('DELETE FROM mysql_test_data');
     
-    // 4. Seed data
     const products = [
       ['Laptop', 999.99, 10, 'Electronics'],
       ['Mouse', 25.50, 50, 'Electronics'],
@@ -50,57 +46,53 @@ export async function POST(request: Request) {
     
     for (const product of products) {
       await connection.query(
-        'INSERT INTO nextjs_test_data (name, price, quantity, category) VALUES (?, ?, ?, ?)',
+        'INSERT INTO mysql_test_data (name, price, quantity, category) VALUES (?, ?, ?, ?)',
         product
       );
     }
     results.seed = `✅ Inserted ${products.length} products`;
 
-    // 5. Read all products
-    const [allProducts] = await connection.query('SELECT * FROM nextjs_test_data');
+    // Read all
+    const [allProducts] = await connection.query('SELECT * FROM mysql_test_data');
     results.read_all = `✅ Found ${(allProducts as any[]).length} products`;
 
-    // 6. Update product
-    await connection.query('UPDATE nextjs_test_data SET price = 29.99 WHERE name = "Mouse"');
-    const [updatedMouse] = await connection.query('SELECT * FROM nextjs_test_data WHERE name = "Mouse"');
+    // Update
+    await connection.query('UPDATE mysql_test_data SET price = 29.99 WHERE name = "Mouse"');
+    const [updatedMouse] = await connection.query('SELECT * FROM mysql_test_data WHERE name = "Mouse"');
     results.update = `✅ Mouse price updated to $${(updatedMouse as any[])[0]?.price}`;
 
-    // 7. Delete test
-    await connection.query('INSERT INTO nextjs_test_data (name, price, quantity, category) VALUES ("Temp", 9.99, 1, "Test")');
-    await connection.query('DELETE FROM nextjs_test_data WHERE name = "Temp"');
+    // Delete test
+    await connection.query('INSERT INTO mysql_test_data (name, price, quantity, category) VALUES ("Temp", 9.99, 1, "Test")');
+    await connection.query('DELETE FROM mysql_test_data WHERE name = "Temp"');
     results.delete = '✅ Temp product deleted';
 
-    // 8. Get statistics
+    // Statistics
     const [stats] = await connection.query(`
       SELECT category, COUNT(*) as count, SUM(quantity) as total_stock 
-      FROM nextjs_test_data 
+      FROM mysql_test_data 
       GROUP BY category
     `);
     results.statistics = stats;
 
-    // 9. Final count
-    const [finalCount] = await connection.query('SELECT COUNT(*) as total FROM nextjs_test_data');
-    results.final_count = `✅ ${(finalCount as any[])[0].total} products remaining`;
-
-    // Close connection
     await connection.end();
 
-    // Return success response
     return NextResponse.json({
       success: true,
-      message: 'All CRUD operations completed successfully',
+      message: 'All CRUD operations completed',
       timestamp: new Date().toISOString(),
       results
     });
 
   } catch (error: any) {
-    console.error('Database test error:', error);
-    
+    console.error('Database error:', error);
     return NextResponse.json({
       success: false,
-      message: 'Database test failed',
-      error: error.message,
-      timestamp: new Date().toISOString()
+      error: error.message
     }, { status: 500 });
   }
+}
+
+// Also handle GET for easy testing
+export async function GET(request: Request) {
+  return POST(request);
 }
