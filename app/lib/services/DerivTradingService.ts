@@ -112,14 +112,14 @@ export class DerivTradingService {
     
     await this.pool.execute(createTradesTableSQL);
     
-    // Create transaction log table
+    // Create transaction log table - TEXT instead of JSON for MySQL 5.5
     const createLogTableSQL = `
       CREATE TABLE IF NOT EXISTS transaction_log (
         id INT AUTO_INCREMENT PRIMARY KEY,
         type VARCHAR(50) NOT NULL,
         trade_id INT,
         contract_id VARCHAR(255),
-        details JSON,
+        details TEXT,
         timestamp DATETIME NOT NULL,
         INDEX idx_type (type),
         INDEX idx_trade_id (trade_id),
