@@ -12,49 +12,6 @@ interface DerivConfig {
     wsUrl: string;
 }
 
-interface BinaryOptionsParams {
-    amount: number;           // Stake amount in USD
-    contract_type: 'CALL' | 'PUT';  // CALL = price goes up, PUT = price goes down
-    duration: number;         // Duration value
-    duration_unit: 't' | 's' | 'm' | 'h';  // t=ticks, s=seconds, m=minutes, h=hours
-    symbol: string;           // e.g., 'R_100', 'R_75', 'BOOM1000', 'CRASH1000'
-    barrier?: number;         // Optional: specific price level
-    basis?: 'stake' | 'payout';  // 'stake' = risk amount, 'payout' = target payout
-}
-
-interface ProposalRequest {
-    amount: number;
-    basis: 'stake' | 'payout';
-    contract_type: 'CALL' | 'PUT';
-    currency: 'USD';
-    duration: number;
-    duration_unit: 't' | 's' | 'm' | 'h';
-    symbol: string;
-}
-
-interface BuyRequest {
-    price: number;           // The proposal price
-    parameters: {
-        amount: number;
-        basis: 'stake' | 'payout';
-        contract_type: 'CALL' | 'PUT';
-        currency: 'USD';
-        duration: number;
-        duration_unit: 't' | 's' | 'm' | 'h';
-        symbol: string;
-    };
-}
-
-interface TradeResponse {
-    success: boolean;
-    message?: string;
-    botState?: any;
-    seededTables?: any[];
-    duration_ms?: number;
-    error?: string;
-    timestamp: string;
-}
-
 // ============================================
 // MAIN API ENDPOINT
 // ============================================
@@ -80,9 +37,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             );
         }
 
-        // 2. Parse request
-        const body = await request.json();
-        console.log('📡 Trading triggered by Firebase:', body);
+        // 2. Parse request - with error handling for empty body
+        let body = {};
+        try {
+            const text = await request.text();
+            if (text) {
+                body = JSON.parse(text);
+            }
+            console.log('📡 Trading triggered:', body);
+        } catch (parseError) {
+            console.log('📡 Trading triggered (no body or invalid JSON)');
+        }
 
         // 3. Validate environment
         const appId = parseInt(process.env.DERIV_APP_ID || '1089');
@@ -103,6 +68,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
         // 5. Initialize StarBot if not exists
         if (!tradingBot) {
+            console.log('🤖 Initializing StarBot...');
             tradingBot = new StarBotTradingLogic({
                 appId: appId,
                 token: apiToken,
@@ -111,6 +77,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
             // Initialize bot on first run
             await tradingBot.initializeBot();
+            console.log('✅ StarBot initialized successfully');
         }
 
         // 6. Process trading cycle
@@ -143,9 +110,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     } catch (error: any) {
         console.error('❌ Trading cycle error:', error);
         
+        // Ensure we always return valid JSON
         return NextResponse.json({
             success: false,
             error: error.message || 'Internal server error',
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
             timestamp: new Date().toISOString()
         }, { status: 500 });
     }
@@ -155,12 +124,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 export async function DELETE(): Promise<NextResponse> {
     try {
         if (candleService) {
-            candleService.closeConnection();
+            await candleService.closeConnection();
             candleService = null;
             isCandleServiceInitialized = false;
         }
         
         if (tradingBot) {
+            await tradingBot.closeConnections();
             tradingBot = null;
         }
         
@@ -200,8 +170,7 @@ export async function GET(): Promise<NextResponse> {
                 config: {
                     derivAppId: process.env.DERIV_APP_ID || '1089',
                     derivWsUrl: process.env.DERIV_WS_URL || 'wss://ws.binaryws.com/websockets/v3',
-                    cronSecretRequired: 'Hardcoded - no env var needed',
-                    supabaseConfigured: false
+                    cronSecretRequired: 'Hardcoded - no env var needed'
                 },
                 timestamp: new Date().toISOString()
             });
