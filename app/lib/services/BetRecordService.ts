@@ -39,7 +39,6 @@ export interface BetRecord {
   fifthbetactual: string | null;
   fifthbetexpectedcandle: string | null;
   created_at: Date;
-  updated_at: Date;
 }
 
 export class BetRecordService {
@@ -91,7 +90,6 @@ export class BetRecordService {
           fifthbetactual VARCHAR(10) NULL,
           fifthbetexpectedcandle VARCHAR(10) NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
           INDEX idx_sessionid (sessionid),
           INDEX idx_sessionresult (sessionresult),
           INDEX idx_created_at (created_at)
@@ -186,8 +184,7 @@ export class BetRecordService {
       fifthbetResult: record.fifthbetResult,
       fifthbetactual: record.fifthbetactual,
       fifthbetexpectedcandle: record.fifthbetexpectedcandle,
-      created_at: new Date(record.created_at),
-      updated_at: new Date(record.updated_at)
+      created_at: new Date(record.created_at)
     };
   }
 
@@ -230,8 +227,7 @@ export class BetRecordService {
       fifthbetResult: record.fifthbetResult,
       fifthbetactual: record.fifthbetactual,
       fifthbetexpectedcandle: record.fifthbetexpectedcandle,
-      created_at: new Date(record.created_at),
-      updated_at: new Date(record.updated_at)
+      created_at: new Date(record.created_at)
     };
   }
 
@@ -310,8 +306,7 @@ export class BetRecordService {
       fifthbetResult: record.fifthbetResult,
       fifthbetactual: record.fifthbetactual,
       fifthbetexpectedcandle: record.fifthbetexpectedcandle,
-      created_at: new Date(record.created_at),
-      updated_at: new Date(record.updated_at)
+      created_at: new Date(record.created_at)
     }));
   }
 
@@ -352,7 +347,6 @@ export class BetRecordService {
       return this.getRecordById(pattern, id);
     }
     
-    fields.push('updated_at = NOW()');
     values.push(id);
     
     const updateSQL = `UPDATE ${tableName} SET ${fields.join(', ')} WHERE id = ?`;
@@ -468,8 +462,8 @@ export class BetRecordService {
               thirdbetAmount, thirdbetResult, thirdbetactual, thirdbetexpectedcandle,
               fourthbetAmount, fourthbetResult, fourthbetactual, fourthbetexpectedcandle,
               fifthbetAmount, fifthbetResult, fifthbetactual, fifthbetexpectedcandle,
-              created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+              created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
           `;
           
           await this.pool.execute(insertSQL, [
