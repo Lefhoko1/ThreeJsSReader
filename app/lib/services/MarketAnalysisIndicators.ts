@@ -129,15 +129,16 @@ export class MarketAnalysisIndicators {
     const tableName = this.getTableName(symbol);
     
     try {
+      // Use 'datetime' column since your tables have that
       const [rows] = await this.pool.execute(
-        `SELECT timestamp, open, high, low, close, epoch, datetime 
+        `SELECT datetime, open, high, low, close, epoch 
          FROM ${tableName} 
-         ORDER BY timestamp ASC`
+         ORDER BY datetime ASC`
       );
       
       const candles = rows as any[];
       return candles.map(candle => ({
-        timestamp: new Date(candle.timestamp),
+        timestamp: new Date(candle.datetime),  // Map datetime to timestamp for compatibility
         open: parseFloat(candle.open),
         high: parseFloat(candle.high),
         low: parseFloat(candle.low),
